@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#1F5FA8">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="กินขึ้น">
+  <meta name="robots" content="noindex, nofollow">
+  <title>กินให้ขึ้น</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="icon" type="image/png" href="icons/icon-192.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai+Looped:wght@400;500;600&family=Mitr:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <div id="busy" aria-hidden="true"></div>
+
+  <!-- หน้าใส่ PIN -->
+  <section id="pin" hidden>
+    <div class="pin-box">
+      <svg class="pin-logo" viewBox="0 0 64 64" aria-hidden="true">
+        <circle cx="32" cy="32" r="28" class="logo-plate"/>
+        <circle cx="32" cy="32" r="21" class="logo-line"/>
+        <path d="M22 37 L32 26 L42 37" class="logo-up"/>
+      </svg>
+      <h1>กินให้ขึ้น</h1>
+      <p class="pin-hint">ใส่ PIN 6 หลัก</p>
+      <div class="pin-dots" id="pin-dots" aria-live="polite"></div>
+      <p class="pin-msg" id="pin-msg" role="alert"></p>
+      <div class="keypad" id="keypad"></div>
+    </div>
+  </section>
+
+  <!-- ตัวแอป -->
+  <div id="app" hidden>
+    <main id="view"></main>
+    <nav id="nav" aria-label="เมนูหลัก">
+      <button data-act="nav" data-tab="today" aria-current="page">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5.5"/></svg>
+        <span>วันนี้</span>
+      </button>
+      <button data-act="nav" data-tab="progress">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4" width="17" height="16" rx="3"/><path d="M8.5 9.5a5 5 0 0 1 7 0"/><path d="M12 9.5l1.5-1.5"/></svg>
+        <span>น้ำหนัก</span>
+      </button>
+      <button data-act="nav" data-tab="summary">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 20V11"/><path d="M12 20V5"/><path d="M19 20v-6"/></svg>
+        <span>สรุป</span>
+      </button>
+      <button data-act="nav" data-tab="settings">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/></svg>
+        <span>ตั้งค่า</span>
+      </button>
+    </nav>
+  </div>
+
+  <!-- แผ่นเลื่อนขึ้นจากล่าง -->
+  <div id="sheet" hidden>
+    <div class="sheet-backdrop" data-act="sheet-close"></div>
+    <div class="sheet-panel" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+      <div class="sheet-head">
+        <h2 id="sheet-title"></h2>
+        <button class="icon-btn" data-act="sheet-close" aria-label="ปิด">✕</button>
+      </div>
+      <div id="sheet-body"></div>
+    </div>
+  </div>
+
+  <div id="toast" role="status" aria-live="polite"></div>
+
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
