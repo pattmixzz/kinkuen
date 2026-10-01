@@ -266,6 +266,59 @@ h1 .date-btn { border-bottom-width: 1.5px; }
 .step button { width: 30px; height: 30px; border-radius: 50%; border: 1px solid var(--line); background: var(--bg); line-height: 1; }
 .step span { min-width: 26px; text-align: center; }
 
+/* ---------- สถานะส่งข้อมูล ---------- */
+#sync {
+  position: fixed; z-index: 30; right: 12px; bottom: calc(var(--nav-h) + env(safe-area-inset-bottom) + 10px);
+  background: var(--surface); border: 1px solid var(--line); border-radius: 999px;
+  padding: 4px 12px; font-size: 13px; color: var(--muted); box-shadow: 0 2px 8px rgba(0,0,0,.08);
+}
+#sync.off { color: var(--chili); border-color: var(--chili); }
+
+/* ---------- ตัวช่วยเติมแคล ---------- */
+.fill-btn {
+  display: block; margin: 8px auto 0; border: 1px solid var(--rim); background: var(--rim-soft); color: var(--rim);
+  border-radius: 999px; padding: 6px 14px; font-size: 14px;
+}
+.fill-plan { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 0 0 10px; font-size: 14px; }
+.fill-opt {
+  display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-top: 8px;
+}
+.fill-opt b { font-weight: 500; }
+.fill-opt .btn { min-height: 36px; padding: 6px 16px; flex: none; }
+
+/* ---------- งบสัปดาห์ในหน้าวันนี้ ---------- */
+.week-line {
+  display: block; width: 100%; text-align: left; margin-top: 14px; padding: 10px 14px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+}
+.wl-top { display: flex; justify-content: space-between; font-size: 14px; color: var(--muted); }
+.wl-top b { color: var(--ink); font-family: var(--font-display); font-weight: 500; font-size: 17px; }
+.week-line .bar { display: block; margin: 6px 0 4px; }
+.wl-sub { display: block; font-size: 13px; color: var(--muted); }
+
+/* ---------- กราฟรายสัปดาห์ ---------- */
+.wk-chart .ptitle { font-size: 11px; fill: var(--muted); }
+.wk-bar { fill: var(--rim); }
+.wk-bar.hit { fill: var(--basil); }
+.wk-bar.cur { opacity: .55; }
+.wk-target { stroke: var(--ink); stroke-width: 2; stroke-linecap: round; }
+.wk-dot { fill: var(--rim); stroke: var(--surface); stroke-width: 2; }
+.hit-area { fill: transparent; cursor: pointer; }
+.lg-bar { width: 10px; height: 10px; border-radius: 2px; background: var(--rim); }
+.lg-bar.hit { background: var(--basil); }
+.lg-tick { width: 12px; height: 2px; background: var(--ink); }
+.wk-tip { font-size: 14px; margin: 8px 0 0; padding: 8px 10px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+
+/* ---------- งบรายสัปดาห์ ---------- */
+.week-budget { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin-top: 12px; }
+.wb-top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-size: 14px; color: var(--muted); }
+.wb-top b { font-family: var(--font-display); font-weight: 500; font-size: 24px; color: var(--ink); }
+.wb-bar { height: 12px; margin: 8px 0 6px; border-radius: 6px; }
+.wb-note { margin: 0; font-size: 14px; }
+.wb-note.ok { color: var(--basil); }
+.pk-cat-field { margin: 10px 0 6px; }
+
 /* ---------- ฟอร์ม ---------- */
 .field { display: block; margin: 10px 0; }
 .field > span { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
@@ -387,7 +440,7 @@ h1 .date-btn { border-bottom-width: 1.5px; }
 /* ---------- toast ---------- */
 #toast {
   position: fixed; left: 50%; z-index: 80;
-  bottom: calc(var(--nav-h) + env(safe-area-inset-bottom) + 16px);
+  bottom: calc(var(--nav-h) + env(safe-area-inset-bottom) + 52px);
   transform: translate(-50%, 16px); opacity: 0; pointer-events: none;
   background: var(--ink); color: var(--bg); padding: 10px 16px; border-radius: 10px;
   max-width: 90vw; font-size: 14px; transition: opacity .2s, transform .2s;

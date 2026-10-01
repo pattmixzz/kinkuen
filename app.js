@@ -42,6 +42,10 @@ const S = {
   wDate: null,
   anchorDraft: null,
   cal: null,
+  days: {},        // แคชข้อมูลรายวัน (date → day)
+  weeks: {},       // แคชสรุปรายสัปดาห์ (monday → week)
+  weekFetching: {},
+  fillOpts: [],
   pin: ''
 };
 let P = null;          // state ของตัวเลือกเมนู
@@ -52,7 +56,7 @@ const view = () => $('#view');
 // ======================= API =======================
 async function api(action, payload, opt) {
   opt = opt || {};
-  setBusy(1);
+  if (!opt.quiet) setBusy(1);
   try {
     const res = await fetch(API_URL, {
       method: 'POST',
@@ -77,8 +81,155 @@ async function api(action, payload, opt) {
     if (!opt.silent) toast(e.message, true);
     throw e;
   } finally {
-    setBusy(-1);
+    if (!opt.quiet) setBusy(-1);
   }
+}
+
+// ======================= คิวบันทึก (หน้าจอเปลี่ยนก่อน แล้วส่งเบื้องหลัง + ออฟไลน์) =======================
+const Q = { list: [], running: null, offline: false, retry: null };
+try { Q.list = JSON.parse(localStorage.getItem('ct_queue') || '[]') || []; } catch (e) { Q.list = []; }
+
+const tmpId = () => 'tmp_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+const pendingFor = date => Q.list.some(o => o.date === date);
+
+function qSave() {
+  try { localStorage.setItem('ct_queue', JSON.stringify(Q.list)); } catch (e) { /* เต็มหรือถูกปิด */ }
+  renderSync();
+}
+
+function enqueue(action, payload, meta) {
+  Q.list.push(Object.assign({ id: tmpId(), action: action, payload: payload }, meta || {}));
+  qSave();
+  runQueue();
+}
+
+function runQueue() {
+  if (Q.running) return Q.running;
+  if (!S.token || !Q.list.length) { renderSync(); return Promise.resolve(); }
+  Q.running = (async () => {
+    while (Q.list.length && S.token) {
+      const op = Q.list[0];
+      let data;
+      try {
+        data = await api(op.action, op.payload, { silent: true, quiet: true });
+      } catch (e) {
+        if (!e.code || e.code === 'BUSY') {          // ไม่มีเน็ต / ระบบยุ่ง → รอแล้วลองใหม่
+          Q.offline = !e.code;
+          clearTimeout(Q.retry);
+          Q.retry = setTimeout(runQueue, e.code ? 3000 : 15000);
+          break;
+        }
+        if (e.code === 'AUTH') break;                // ใส่ PIN ใหม่แล้วค่อยส่งต่อ
+        Q.list.shift(); qSave();                     // ชีทปฏิเสธจริง → ทิ้งรายการนี้ แล้วดึงข้อมูลจริงกลับมา
+        toast('บันทึกไม่สำเร็จ: ' + e.message, true);
+        if (op.date) await refreshDay(op.date);
+        if (op.kind === 'weight') await refreshWeights();
+        continue;
+      }
+      Q.offline = false;
+      Q.list.shift(); qSave();
+      onOpDone(op, data);
+    }
+  })().finally(() => {
+    Q.running = null;
+    renderSync();
+    if (!Q.list.length) afterQueueDrained();
+  });
+  renderSync();
+  return Q.running;
+}
+
+function onOpDone(op, data) {
+  if (op.reloadInit) loadInit(true).catch(() => {});
+  if (op.kind === 'day' && data && data.date === op.date && !pendingFor(op.date)) {
+    setDay(data);
+    if (S.tab === 'today' && S.date === op.date) renderToday();
+  }
+  if (op.kind === 'weight' && !Q.list.some(o => o.kind === 'weight')) refreshWeights();
+}
+
+function afterQueueDrained() {
+  if (S.tab === 'summary') loadSummary();
+}
+
+async function refreshDay(date) {
+  try { setDay(await api('getDay', { date: date }, { silent: true, quiet: true })); } catch (e) { return; }
+  if (S.tab === 'today' && S.date === date) renderToday();
+}
+
+async function refreshWeights() {
+  try { S.weights = await api('getWeights', { days: S.weightsRange }, { silent: true, quiet: true }); } catch (e) { return; }
+  if (S.tab === 'progress') renderProgress();
+}
+
+function renderSync() {
+  let el = $('#sync');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'sync';
+    el.setAttribute('role', 'status');
+    document.body.appendChild(el);
+  }
+  const n = Q.list.length;
+  el.hidden = !n;
+  el.className = Q.offline ? 'off' : '';
+  el.textContent = n ? (Q.offline ? '📴 ออฟไลน์ · รอส่ง ' + n + ' รายการ' : '⏳ กำลังบันทึก ' + n) : '';
+}
+
+window.addEventListener('online', () => { Q.offline = false; runQueue(); });
+
+// ---------- แคชข้อมูลรายวัน ----------
+function setDay(d) {
+  S.days[d.date] = d;
+  if (S.date === d.date) S.day = d;
+}
+
+function invalidateDays() {
+  S.days = {};
+  S.day = null;
+}
+
+function recompute(d) {
+  d.total = d.logs.reduce((a, l) => a + l.kcal_total, 0);
+  d.remaining = d.target != null ? d.target - d.total : null;
+}
+
+function dayTargetFromSettings(d, type) {
+  const st = S.init.settings;
+  return Number(d.weekday <= 5 && type !== 'home' ? st.weekday_target_kcal : st.home_day_target_kcal) || 0;
+}
+
+function bumpUsage(items, date) {
+  const u = S.init.usage = S.init.usage || {};
+  items.forEach(it => {
+    if (!it.food_id) return;
+    const x = u[it.food_id] = u[it.food_id] || { n: 0, last: '' };
+    x.n++;
+    if (date > x.last) x.last = date;
+  });
+}
+
+/** แปลงรายการ (จากแผน/ตะกร้า) เป็นแถวบันทึกในเครื่อง */
+function toLogs(slot, items, source) {
+  return items.map(x => ({
+    log_id: tmpId(), slot: slot, food_id: x.food_id || '', name: x.name, qty: x.qty,
+    kcal_unit: x.kcal_unit, kcal_total: Math.round(x.kcal_unit * x.qty),
+    source: source || (x.food_id ? 'db' : 'custom')
+  }));
+}
+
+/** วันหยุดที่เริ่มบันทึกอาหาร → ตั้งเป็น "อยู่บ้าน" ให้อัตโนมัติ */
+function ensureHomeDay(d) {
+  if (d.weekday > 5 && !d.day_type && d.logs.length) {
+    d.day_type = 'home';
+    enqueue('setDayType', { date: d.date, day_type: 'home' }, { kind: 'day', date: d.date });
+  }
+}
+
+function commitDay(d) {
+  recompute(d);
+  setDay(d);
+  if (S.tab === 'today' && S.date === d.date) renderToday();
 }
 
 function setBusy(d) {
@@ -109,12 +260,14 @@ async function boot() {
     return;
   }
   buildKeypad();
+  renderSync();
   if (!S.token) return showPin();
   try {
-    await loadInit();
+    await runQueue();
+    await loadBundle();
     showApp();
   } catch (e) {
-    if (e.code !== 'AUTH') showPin('เชื่อมต่อไม่ได้ ลองใส่ PIN ใหม่');
+    if (e.code !== 'AUTH') showPin(navigator.onLine ? 'เชื่อมต่อไม่ได้ ลองใส่ PIN ใหม่' : 'ไม่มีอินเทอร์เน็ต ต่อเน็ตแล้วใส่ PIN');
   }
 }
 
@@ -155,7 +308,8 @@ async function submitPin() {
     const r = await api('login', { pin: S.pin }, { silent: true });
     S.token = r.token;
     sessionStorage.setItem('ct_token', r.token);
-    await loadInit();
+    await runQueue();            // มีของค้างส่งจากก่อนหน้า → ส่งก่อน
+    await loadBundle();
     showApp();
   } catch (e) {
     S.pin = '';
@@ -173,8 +327,19 @@ function logoutLocal(msg) {
   showPin(msg);
 }
 
-async function loadInit() {
-  S.init = await api('getInit');
+async function loadInit(quiet) {
+  S.init = await api('getInit', {}, quiet ? { silent: true, quiet: true } : {});
+}
+
+/** โหลดทุกอย่างในครั้งเดียวหลังใส่ PIN → สลับหน้าได้ทันทีไม่ต้องรอ */
+async function loadBundle() {
+  const r = await api('getBundle', { date: S.date, weight_days: S.weightsRange });
+  S.init = r.init;
+  setDay(r.day);
+  S.weeks[r.week.week_start] = r.week;
+  S.insights = r.insights;
+  S.weights = r.weights;
+  S.photos = r.photos;
 }
 
 function showApp() {
@@ -192,21 +357,39 @@ function goTab(tab, force) {
     else b.removeAttribute('aria-current');
   });
   window.scrollTo(0, 0);
-  if (tab === 'today') {
-    if (S.day && S.day.date === S.date && !(same && !force)) renderToday();
-    else loadDay(S.date);
-  }
+  if (tab === 'today') loadDay(S.date);
   if (tab === 'progress') loadProgress();
-  if (tab === 'summary') loadSummary(same && !force);
+  if (tab === 'summary') loadSummary();
   if (tab === 'settings') renderSettings();
 }
 
 // ======================= วันนี้ =======================
 async function loadDay(date) {
   S.date = date;
-  if (!S.day || S.day.date !== date) view().innerHTML = '<p class="empty">กำลังโหลด…</p>';
-  try { S.day = await api('getDay', { date: date }); } catch (e) { return; }
-  if (S.tab === 'today') renderToday();
+  const cached = S.days[date];
+  S.day = cached || null;
+  if (cached) renderToday();
+  else view().innerHTML = '<p class="empty">กำลังโหลด…</p>';
+  if (pendingFor(date)) return;                       // มีของรอส่ง ใช้ข้อมูลในเครื่องไปก่อน
+  let d;
+  try { d = await api('getDay', { date: date }, cached ? { silent: true, quiet: true } : {}); }
+  catch (e) {
+    if (!cached && S.tab === 'today' && S.date === date) view().innerHTML = '<p class="empty">' + esc(e.message) + '</p>';
+    return;
+  }
+  if (pendingFor(date)) return;
+  setDay(d);
+  if (S.tab === 'today' && S.date === date) renderToday();
+}
+
+/** ดึงสรุปสัปดาห์เงียบ ๆ (ใช้กับบรรทัดงบสัปดาห์ในหน้าวันนี้) */
+async function fetchWeekQuiet(date) {
+  const mon = mondayOf(date);
+  if (S.weekFetching[mon]) return;
+  S.weekFetching[mon] = true;
+  try { const w = await api('getWeek', { date: mon }, { silent: true, quiet: true }); S.weeks[w.week_start] = w; }
+  catch (e) { return; } finally { S.weekFetching[mon] = false; }
+  if (S.tab === 'today' && S.day && mondayOf(S.day.date) === mon) renderToday();
 }
 
 function plateSVG(total, target) {
@@ -249,13 +432,15 @@ function renderToday() {
     const target = d.target != null ? d.target : (Number(S.init.settings.home_day_target_kcal) || 0);
     const rem = target - d.total;
     const note = rem > 0
-      ? '<p class="plate-note">ยังขาดอีก <b class="num">' + fmtN(rem) + '</b> kcal</p>'
+      ? '<p class="plate-note">ยังขาดอีก <b class="num">' + fmtN(rem) + '</b> kcal</p>' +
+        '<button class="fill-btn" data-act="fill-open">💡 เติมอะไรดีให้ครบ?</button>'
       : '<p class="plate-note ok">' + (rem === 0 ? 'ถึงเป้าพอดี 🎉' : 'ถึงเป้าแล้ว 🎉 เกินมา <b class="num">' + fmtN(-rem) + '</b>') + '</p>';
     hero = '<div class="plate-wrap">' + plateSVG(d.total, target) +
       '<div class="plate-center"><div class="plate-total num">' + fmtN(d.total) + '</div>' +
       '<div class="plate-sub">จาก ' + fmtN(target) + ' kcal</div></div></div>' + note +
       (d.plan && d.planned_total ? '<p class="plan-hint">กินตามแผน ' + esc(d.plan) + ' ครบ จะได้ประมาณ ' + fmtN(d.planned_total) + '</p>' : '');
   }
+  hero += weekLineHTML(d);
 
   let slips = '';
   if (!isParty) {
@@ -311,26 +496,26 @@ async function toggleParty() {
   const toParty = d.day_type !== 'party';
   if (toParty && d.logs.length && !confirm('วันนี้มีบันทึกอาหารอยู่ ถ้าเป็นวันปาร์ตี้จะไม่ถูกนับในค่าเฉลี่ย ตกลงไหม?')) return;
   const next = toParty ? 'party' : (d.weekday > 5 ? 'home' : 'normal');
-  try { S.day = await api('setDayType', { date: d.date, day_type: next }); } catch (e) { return; }
-  S.week = null; S.insights = null;
-  renderToday();
+  d.day_type = next;
+  d.target = toParty ? null : dayTargetFromSettings(d, next);
+  commitDay(d);
+  enqueue('setDayType', { date: d.date, day_type: next }, { kind: 'day', date: d.date });
   toast(toParty ? 'ตั้งเป็นวันปาร์ตี้แล้ว 🍻' : 'ยกเลิกวันปาร์ตี้แล้ว');
 }
 
-/** วันหยุดที่เริ่มบันทึกอาหาร → ตั้งเป็น "อยู่บ้าน" ให้อัตโนมัติ */
-async function ensureHomeDay() {
-  const d = S.day;
-  if (d && d.weekday > 5 && !d.day_type && d.logs.length) {
-    try { S.day = await api('setDayType', { date: d.date, day_type: 'home' }, { silent: true }); } catch (e) { /* ไม่เป็นไร */ }
-  }
-}
-
 // ======================= ตัวเลือกเมนู (picker) =======================
+const SORTS = [['fav', '⭐ โปรดก่อน'], ['freq', 'กินบ่อยสุด'], ['recent', 'กินล่าสุด'], ['least', 'กินน้อยสุด / ไม่เคยกิน'],
+  ['az', 'ก–ฮ'], ['kcal_desc', 'แคลมาก → น้อย'], ['kcal_asc', 'แคลน้อย → มาก']];
+
 function openPicker(opt) {
-  P = Object.assign({ q: '', cat: 'fav', cart: [], custom: false, customName: '' }, opt);
+  const sort = (S.init.settings.food_sort && SORTS.some(x => x[0] === S.init.settings.food_sort)) ? S.init.settings.food_sort : 'fav';
+  P = Object.assign({ q: '', cat: sort === 'fav' ? 'fav' : 'all', sort: sort, cart: [], custom: false, customName: '' }, opt);
   openSheet(opt.title,
     '<input class="search" type="search" placeholder="ค้นหาเมนู เช่น กะเพรา" data-input="pk-q" aria-label="ค้นหาเมนู" autocomplete="off">' +
-    '<div class="chips" id="pk-cats"></div>' +
+    '<div class="row2 pk-cat-field"><label class="field"><span>หมวด</span><select id="pk-cats" data-input="pk-cat" aria-label="เลือกหมวด"></select></label>' +
+    '<label class="field"><span>เรียงตาม</span><select id="pk-sort" data-input="pk-sort" aria-label="เรียงตาม">' +
+    SORTS.map(x => '<option value="' + x[0] + '"' + (x[0] === P.sort ? ' selected' : '') + '>' + x[1] + '</option>').join('') +
+    '</select></label></div>' +
     '<ul class="food-list" id="pk-list"></ul>' +
     (P.mode === 'plan' ? '' : '<div id="pk-custom"></div>') +
     '<div class="cart" id="pk-cart"></div>');
@@ -343,7 +528,26 @@ function pickerFoods() {
   if (q) list = list.filter(f => f.name.toLowerCase().indexOf(q) !== -1);
   else if (P.cat === 'fav') list = list.filter(f => f.favorite);
   else if (P.cat !== 'all') list = list.filter(f => f.category === P.cat);
-  return list.sort((a, b) => (b.favorite - a.favorite) || a.name.localeCompare(b.name, 'th'));
+  const u = S.init.usage || {};
+  const n = f => (u[f.id] ? u[f.id].n : 0);
+  const last = f => (u[f.id] ? u[f.id].last : '');
+  const az = (a, b) => a.name.localeCompare(b.name, 'th');
+  const cmp = {
+    fav: (a, b) => (b.favorite - a.favorite) || az(a, b),
+    freq: (a, b) => (n(b) - n(a)) || az(a, b),
+    recent: (a, b) => (last(b) > last(a) ? 1 : last(b) < last(a) ? -1 : 0) || az(a, b),
+    least: (a, b) => (n(a) - n(b)) || az(a, b),
+    az: az,
+    kcal_desc: (a, b) => (b.kcal - a.kcal) || az(a, b),
+    kcal_asc: (a, b) => (a.kcal - b.kcal) || az(a, b)
+  }[P.sort] || az;
+  return list.sort(cmp);
+}
+
+function usageMeta(f) {
+  const x = (S.init.usage || {})[f.id];
+  if (['freq', 'recent', 'least'].indexOf(P.sort) === -1) return '';
+  return x ? ' | กินแล้ว ' + x.n + ' ครั้ง ล่าสุด ' + thDate(x.last) : ' | ยังไม่เคยกิน';
 }
 
 function categories() {
@@ -354,16 +558,18 @@ function categories() {
 
 function renderPicker() {
   const cats = [['fav', '⭐ โปรด'], ['all', 'ทั้งหมด']].concat(categories().map(c => [c, c]));
+  const count = c => S.init.foods.filter(f => f.active && (c === 'all' || (c === 'fav' ? f.favorite : f.category === c))).length;
   $('#pk-cats').innerHTML = cats.map(c =>
-    '<button class="chip" data-act="pk-cat" data-cat="' + esc(c[0]) + '" aria-pressed="' + (!P.q && P.cat === c[0]) + '">' + esc(c[1]) + '</button>'
+    '<option value="' + esc(c[0]) + '"' + (P.cat === c[0] ? ' selected' : '') + '>' + esc(c[1]) + ' (' + count(c[0]) + ')</option>'
   ).join('');
+  $('#pk-cats').disabled = !!P.q.trim();
 
   const list = pickerFoods();
   const inCart = P.cart.filter(c => c.food_id).map(c => c.food_id);
   $('#pk-list').innerHTML = list.length
     ? list.map(f =>
       '<li><button class="food-row' + (inCart.indexOf(f.id) !== -1 ? ' in-cart' : '') + '" data-act="pk-add" data-id="' + esc(f.id) + '">' +
-      '<span>' + esc(f.name) + '<span class="meta">ต่อ 1 ' + esc(f.unit) + (f.note ? ' | ' + esc(f.note) : '') + '</span></span>' +
+      '<span>' + esc(f.name) + '<span class="meta">ต่อ 1 ' + esc(f.unit) + (f.note ? ' | ' + esc(f.note) : '') + esc(usageMeta(f)) + '</span></span>' +
       '<span class="k num">' + fmtN(f.kcal) + '</span></button></li>').join('')
     : '<li class="empty">ไม่เจอ "' + esc(P.q) + '" ในคลัง' +
       (P.mode === 'plan' ? '' : '<br><button class="link-btn" data-act="pk-custom-open">เพิ่มเป็นเมนูใหม่</button>') + '</li>';
@@ -386,7 +592,7 @@ function renderCustom() {
     '<label class="field"><span>หน่วย</span><input id="ck-unit" value="จาน"></label></div>' +
     '<div class="row2"><label class="field"><span>หมวด</span><select id="ck-cat">' +
     cats.map(c => '<option' + (c === 'จานหลัก' ? ' selected' : '') + '>' + esc(c) + '</option>').join('') +
-    '</select></label><label class="field"><span>จำนวน</span><input id="ck-qty" type="number" inputmode="decimal" min="0.5" step="0.5" value="1"></label></div>' +
+    '</select></label><label class="field"><span>จำนวน</span><input id="ck-qty" type="number" inputmode="decimal" min="0.5" step="any" value="1"></label></div>' +
     '<label class="check"><input type="checkbox" id="ck-save" checked> บันทึกเข้าคลังด้วย ครั้งหน้าจะได้กดเลือก</label>' +
     '<p class="muted small">ไม่รู้แคล ลองเทียบกับเมนูที่ใกล้เคียงในคลัง ถ้าเป็นของแพ็กดูจากฉลาก</p>' +
     '<button class="btn btn-ghost btn-block" data-act="pk-custom-add">ใส่ลงรายการ</button></div>';
@@ -395,17 +601,18 @@ function renderCustom() {
 function renderCart() {
   const total = P.cart.reduce((a, c) => a + c.kcal_unit * c.qty, 0);
   const label = P.mode === 'plan' ? 'บันทึกแผน' : P.mode === 'add' ? 'เพิ่มเข้ามื้อ' + P.slot : 'บันทึกมื้อ' + P.slot;
-  const emptyLabel = P.mode === 'add' ? '' : (P.mode === 'plan' ? 'ล้างมื้อนี้ในแผน' : 'ล้างมื้อนี้');
+  const emptyLabel = P.mode === 'plan' ? 'ล้างมื้อนี้ในแผน' : (P.mode === 'replace' && P.hadLogs ? 'ล้างมื้อนี้' : 'เลือกเมนูก่อน');
   $('#pk-cart').innerHTML =
     (P.cart.length
       ? '<ul>' + P.cart.map((c, i) =>
         '<li><span>' + esc(c.name) + '</span><span class="step">' +
-        '<button data-act="pk-qty" data-i="' + i + '" data-d="-0.5" aria-label="ลด">−</button><span class="num">' + c.qty + '</span>' +
-        '<button data-act="pk-qty" data-i="' + i + '" data-d="0.5" aria-label="เพิ่ม">+</button></span>' +
+        '<button data-act="pk-qty" data-i="' + i + '" data-d="-1" aria-label="ลด">−</button><span class="num">' + c.qty + '</span>' +
+        '<button data-act="pk-qty" data-i="' + i + '" data-d="1" aria-label="เพิ่ม">+</button></span>' +
         '<span class="num">' + fmtN(c.kcal_unit * c.qty) + '</span></li>').join('') + '</ul>'
-      : '<p class="muted small">แตะเมนูด้านบนเพื่อเลือก เลือกได้หลายอย่าง</p>') +
+      : '<p class="muted small">แตะเมนูด้านบนเพื่อเลือก เลือกได้หลายอย่าง' +
+        (P.planned && P.planned.length ? '<br><button class="link-btn" data-act="pk-use-plan">หรือใช้เมนูตามแผนมาแก้ต่อ</button>' : '') + '</p>') +
     '<div class="cart-total"><span>รวม</span><span class="num">' + fmtN(total) + ' kcal</span></div>' +
-    '<button class="btn btn-block" data-act="pk-save"' + (!P.cart.length && P.mode === 'add' ? ' disabled' : '') + '>' +
+    '<button class="btn btn-block" data-act="pk-save"' + (!P.cart.length && (P.mode === 'add' || (P.mode === 'replace' && !P.hadLogs)) ? ' disabled' : '') + '>' +
     esc(P.cart.length ? label : emptyLabel) + '</button>';
 }
 
@@ -420,8 +627,8 @@ function pickerAdd(id) {
 
 function pickerQty(i, d) {
   const c = P.cart[i];
-  c.qty = Math.round((c.qty + d) * 2) / 2;
-  if (c.qty <= 0) P.cart.splice(i, 1);
+  c.qty = Math.round((c.qty + d) * 100) / 100;
+  if (c.qty < 1) P.cart.splice(i, 1);          // เหลือน้อยกว่า 1 → เอาออกจากรายการ
   renderPicker();
 }
 
@@ -447,28 +654,111 @@ async function pickerSave() {
     if (P.mode === 'plan') {
       const r = await api('updatePlanSlot', { plan: P.plan, weekday: P.weekday, slot: P.slot, items: items });
       S.init.plans = r.plans;
-      S.day = null;
+      invalidateDays();
       closeSheet();
       renderSettings();
       toast('บันทึกแผนแล้ว');
     } else {
-      S.day = await api(P.mode === 'add' ? 'addLog' : 'replaceSlot', { date: P.date, slot: P.slot, items: items });
-      await ensureHomeDay();
-      const savedToDb = items.some(i => i.save_to_db);
+      const d = S.days[P.date] || S.day;
+      const slot = P.slot, date = P.date, mode = P.mode;
+      if (mode === 'replace') d.logs = d.logs.filter(l => l.slot !== slot);
+      d.logs = d.logs.concat(toLogs(slot, P.cart));
+      bumpUsage(P.cart, date);
+      enqueue(mode === 'add' ? 'addLog' : 'replaceSlot', { date: date, slot: slot, items: items },
+        { kind: 'day', date: date, reloadInit: items.some(i => i.save_to_db) });
+      ensureHomeDay(d);
       closeSheet();
-      renderToday();
+      commitDay(d);
       toast(items.length ? 'บันทึกแล้ว' : 'ล้างมื้อแล้ว');
-      if (savedToDb) loadInit().catch(() => {});
     }
   } catch (e) { /* toast แสดงแล้ว */ }
 }
 
+// ======================= ตัวช่วยเติมแคล =======================
+function openFill() {
+  const d = S.day;
+  const rem = (d.target || 0) - d.total;
+  // ใส่ลง "เสริม" เป็นค่าเริ่มต้น (ไม่ไปทับมื้อที่มีแผนรอกินอยู่) ถึงไม่มีในตั้งค่าก็สร้างใบให้เอง
+  const slots = d.slots.slice();
+  if (slots.indexOf('เสริม') === -1) slots.push('เสริม');
+  const defSlot = 'เสริม';
+  const unlogged = Object.keys(d.planned || {}).filter(s => !d.logs.some(l => l.slot === s));
+  const planLeft = unlogged.reduce((a, s) => a + d.planned[s].reduce((b, x) => b + x.kcal_total, 0), 0);
+  const gap = rem - planLeft;
+
+  let html = '';
+  if (planLeft > 0) {
+    html += '<p class="fill-plan">ยังมีมื้อตามแผนที่ยังไม่ได้กิน <b>' + unlogged.map(esc).join(', ') + '</b> (~' + fmtN(planLeft) + ' kcal)' +
+      (gap <= 0 ? '<br>กินตามแผนให้ครบก็ถึงเป้าแล้ว 👍' : '<br>กินตามแผนแล้วยังขาดอีก ~<b class="num">' + fmtN(gap) + '</b> kcal') + '</p>';
+  }
+  if (gap <= 0) { openSheet('เติมให้ครบ', html); return; }
+
+  S.fillOpts = fillOptions(gap);
+  html += '<p class="muted small">ขาด ~' + fmtN(gap) + ' kcal ลองชุดนี้ (เลือกจากของในคลังที่กินบ่อย/ติดดาว)</p>' +
+    '<label class="field"><span>ใส่ลงมื้อ</span><select id="fill-slot">' +
+    slots.map(s => '<option' + (s === defSlot ? ' selected' : '') + '>' + esc(s) + '</option>').join('') + '</select></label>';
+  html += S.fillOpts.length
+    ? S.fillOpts.map((o, i) => '<div class="fill-opt"><div><b>' + o.items.map(x => esc(x.name) + (x.qty > 1 ? ' ×' + x.qty : '')).join(' + ') +
+        '</b><span class="muted small"> ≈ ' + fmtN(o.total) + ' kcal</span></div>' +
+        '<button class="btn" data-act="fill-add" data-i="' + i + '">ใส่</button></div>').join('')
+    : '<p class="empty">ยังไม่มีของว่าง/เครื่องดื่ม/ผลไม้ในคลังที่เหมาะ ลองเพิ่มในคลังเมนูก่อน</p>';
+  openSheet('เติมให้ครบ', html);
+}
+
+/** หาชุดของว่าง 1–2 อย่าง (อย่างละ 1–3) ที่แคลใกล้ส่วนที่ขาด */
+function fillOptions(gap) {
+  const u = S.init.usage || {};
+  const skip = gap >= 600 ? ['ท็อปปิ้ง'] : ['จานหลัก', 'ท็อปปิ้ง'];
+  const pref = f => (f.favorite ? 30 : 0) + Math.min((u[f.id] ? u[f.id].n : 0) * 5, 50);
+  const cands = S.init.foods.filter(f => f.active && f.kcal >= 50 && skip.indexOf(f.category) === -1)
+    .sort((a, b) => pref(b) - pref(a)).slice(0, 15);
+  const combos = [];
+  const push = items => {
+    const total = items.reduce((a, x) => a + x.f.kcal * x.qty, 0);
+    if (total < gap * 0.85 || total > gap + 300) return;
+    const qtyPen = items.reduce((a, x) => a + (x.qty - 1) * 15, 0);
+    const score = (total < gap ? (gap - total) * 2 : total - gap) + qtyPen - items.reduce((a, x) => a + pref(x.f), 0) / items.length;
+    combos.push({ score: score, total: total, items: items.map(x => ({ food_id: x.f.id, name: x.f.name, kcal_unit: x.f.kcal, qty: x.qty })) });
+  };
+  cands.forEach((a, i) => {
+    for (let qa = 1; qa <= 3; qa++) {
+      push([{ f: a, qty: qa }]);
+      cands.slice(i + 1).forEach(b => { for (let qb = 1; qb <= 2; qb++) push([{ f: a, qty: qa }, { f: b, qty: qb }]); });
+    }
+  });
+  combos.sort((a, b) => a.score - b.score);
+  const out = [], seen = {};
+  combos.forEach(c => {
+    const key = c.items.map(x => x.food_id).sort().join('+');
+    if (out.length < 3 && !seen[key]) { seen[key] = 1; out.push(c); }
+  });
+  return out;
+}
+
+function addFill(i) {
+  const o = S.fillOpts[i];
+  if (!o) return;
+  const d = S.day;
+  const slot = $('#fill-slot').value;
+  if (d.slots.indexOf(slot) === -1) d.slots.push(slot);
+  d.logs = d.logs.concat(toLogs(slot, o.items));
+  bumpUsage(o.items, d.date);
+  enqueue('addLog', { date: d.date, slot: slot, items: o.items.map(x => ({ food_id: x.food_id, qty: x.qty })) }, { kind: 'day', date: d.date });
+  ensureHomeDay(d);
+  closeSheet();
+  commitDay(d);
+  toast('ใส่ลงมื้อ' + slot + 'แล้ว');
+}
+
 // ======================= น้ำหนัก + รูป =======================
 async function loadProgress() {
-  if (!S.weights) view().innerHTML = '<p class="empty">กำลังโหลด…</p>';
+  const cached = !!S.weights;
+  if (!cached) view().innerHTML = '<p class="empty">กำลังโหลด…</p>';
   else renderProgress();
+  if (Q.list.some(o => o.kind === 'weight')) return;
   try {
-    const r = await Promise.all([api('getWeights', { days: S.weightsRange }), api('listPhotos')]);
+    const o = cached ? { silent: true, quiet: true } : {};
+    const r = await Promise.all([api('getWeights', { days: S.weightsRange }, o), api('listPhotos', {}, o)]);
     S.weights = r[0]; S.photos = r[1];
   } catch (e) { return; }
   if (S.tab === 'progress') renderProgress();
@@ -560,13 +850,16 @@ async function saveWeight() {
   const kg = Number($('#w-kg').value);
   const date = S.wDate;
   if (!(kg >= 20 && kg <= 300)) return toast('ใส่น้ำหนักให้ถูกต้อง', true);
-  try {
-    const r = await api('logWeight', { date: date, weight_kg: kg });
-    toast('บันทึก ' + fmtKg(kg) + ' กก. แล้ว' + (r.flag === 'post_party' ? ' (หลังปาร์ตี้ ไม่นับเทียบ)' : ''));
-    S.week = null; S.insights = null;
-    S.weights = await api('getWeights', { days: S.weightsRange });
-    renderProgress();
-  } catch (e) { /* toast แล้ว */ }
+  const prev = S.days[addDays(date, -1)];
+  const flag = prev && prev.day_type === 'party' ? 'post_party' : '';
+  const ws = (S.weights || []).filter(w => w.date !== date);
+  const old = (S.weights || []).find(w => w.date === date);
+  ws.push({ date: date, weight_kg: kg, flag: flag, note: '', avg7: old ? old.avg7 : null });
+  ws.sort((a, b) => (a.date < b.date ? -1 : 1));
+  S.weights = ws;
+  enqueue('logWeight', { date: date, weight_kg: kg }, { kind: 'weight' });
+  renderProgress();
+  toast('บันทึก ' + fmtKg(kg) + ' กก. แล้ว' + (flag ? ' (หลังปาร์ตี้ ไม่นับเทียบ)' : ''));
 }
 
 async function loadThumbs() {
@@ -662,18 +955,139 @@ async function openCompare() {
 }
 
 // ======================= สรุป =======================
-async function loadSummary(refresh) {
-  if (refresh) { S.week = null; S.insights = null; }
-  if (!S.week) view().innerHTML = '<p class="empty">กำลังโหลด…</p>';
-  else renderSummary();
+async function loadSummary() {
+  const mon = mondayOf(S.weekDate);
+  S.week = S.weeks[mon] || null;
+  if (S.week) renderSummary();
+  else view().innerHTML = '<p class="empty">กำลังโหลด…</p>';
+  let r;
   try {
-    const r = await Promise.all([
-      api('getWeek', { date: S.weekDate }),
-      S.insights ? Promise.resolve(S.insights) : api('getInsights', { weeks: 8 })
-    ]);
-    S.week = r[0]; S.insights = r[1];
+    const o = S.week ? { silent: true, quiet: true } : {};
+    r = await Promise.all([api('getWeek', { date: mon }, o), api('getInsights', { weeks: 8 }, { silent: true, quiet: true })]);
   } catch (e) { return; }
-  if (S.tab === 'summary') renderSummary();
+  S.weeks[r[0].week_start] = r[0];
+  S.insights = r[1];
+  if (S.tab === 'summary' && mondayOf(S.weekDate) === r[0].week_start) { S.week = r[0]; renderSummary(); }
+}
+
+/** รวมข้อมูลในเครื่องที่ใหม่กว่าเข้ากับสรุปสัปดาห์ */
+function mergedDays(w) {
+  return w.days.map(x => {
+    const L = S.days[x.date];
+    return L ? { date: x.date, weekday: x.weekday, day_type: L.day_type, total: L.total, target: L.target } : x;
+  });
+}
+
+function weekBudget(w) {
+  const today = todayISO();
+  const thisWeek = w.week_start <= today && today <= w.week_end;
+  const days = mergedDays(w);
+  let eaten = 0, target = 0, futureDays = 0, workDays = 0, homeDays = 0, todayCounts = false;
+  days.forEach(d => {
+    if (d.day_type === 'party') return;
+    const counted = d.weekday <= 5 || d.day_type === 'home' || d.total > 0;
+    if (!counted) return;
+    if (d.weekday <= 5) workDays++; else homeDays++;
+    eaten += d.total;
+    target += d.target || 0;
+    if (thisWeek && d.date > today && d.weekday <= 5) futureDays++;
+    if (d.date === today) todayCounts = true;
+  });
+  const left = target - eaten;
+  const daysLeft = thisWeek ? futureDays + (todayCounts ? 1 : 0) : 0;
+  return { thisWeek: thisWeek, eaten: eaten, target: target, left: left, daysLeft: daysLeft,
+    perDay: daysLeft ? left / daysLeft : null, workDays: workDays, homeDays: homeDays };
+}
+
+function weekLineHTML(d) {
+  const w = S.weeks[mondayOf(d.date)];
+  if (!w) { fetchWeekQuiet(d.date); return ''; }
+  const b = weekBudget(w);
+  if (!b.target) return '';
+  const pct = Math.min(b.eaten / b.target, 1) * 100;
+  return '<button class="week-line" data-act="week-open" data-date="' + d.date + '">' +
+    '<span class="wl-top"><span>' + (b.thisWeek ? 'สัปดาห์นี้' : 'สัปดาห์นั้น') + '</span><span class="num"><b>' + fmtN(b.eaten) + '</b> / ' + fmtN(b.target) + '</span></span>' +
+    '<span class="bar"><i class="' + (b.left <= 0 ? 'hit' : '') + '" style="width:' + pct.toFixed(0) + '%"></i></span>' +
+    '<span class="wl-sub">' + (b.left <= 0 ? 'ถึงเป้าทั้งสัปดาห์แล้ว 🎉'
+      : 'ขาดอีก ' + fmtN(b.left) + (b.perDay ? ' · เฉลี่ยวันละ ' + fmtN(b.perDay) + ' (' + b.daysLeft + ' วันทำงาน)' : '')) + ' ›</span></button>';
+}
+
+/** กราฟรายสัปดาห์ 2 แผงแกนเดียวกัน: แคลรวม (แท่ง + ขีดเป้า) และน้ำหนักเฉลี่ย (เส้น) */
+function weekChartHTML(ins) {
+  const cur = Object.assign({}, ins.current, { current: true });
+  const w = S.weeks[cur.week_start];
+  if (w) { const b = weekBudget(w); cur.kcal_total = b.eaten; cur.target_total = b.target; }
+  const weeks = ins.weeks.slice(-7).concat([cur]);
+  if (!weeks.some(x => x.kcal_total > 0 || x.weight_avg != null)) {
+    return '<p class="empty">ใช้ไปสักสัปดาห์ กราฟแคลกับน้ำหนักจะขึ้นตรงนี้</p>';
+  }
+  S.chartWeeks = weeks;
+  const W = 340, pl = 36, pr = 8, n = weeks.length, band = (W - pl - pr) / n, bw = Math.min(22, band * 0.55);
+  const cx = i => pl + band * i + band / 2;
+
+  // แผงบน: แคล
+  const H1 = 120, t1 = 18, b1 = H1 - 4;
+  const kmax = Math.max.apply(null, weeks.map(x => Math.max(x.kcal_total || 0, x.target_total || 0)).concat([1000])) * 1.05;
+  const y1 = v => b1 - v / kmax * (b1 - t1);
+  const kfmt = v => (v >= 1000 ? (v / 1000).toFixed(v % 1000 ? 1 : 0) + 'k' : String(Math.round(v)));
+  let g1 = '<text class="lbl ptitle" x="0" y="11">แคลรวมต่อสัปดาห์</text>';
+  [0, kmax / 2, kmax / 1.05].forEach(v => {
+    g1 += '<line class="grid" x1="' + pl + '" x2="' + (W - pr) + '" y1="' + y1(v).toFixed(1) + '" y2="' + y1(v).toFixed(1) + '"/>' +
+      '<text class="lbl" x="' + (pl - 5) + '" y="' + (y1(v) + 3).toFixed(1) + '" text-anchor="end">' + kfmt(v) + '</text>';
+  });
+  weeks.forEach((x, i) => {
+    const v = x.kcal_total || 0;
+    if (v > 0) {
+      const top = y1(v), x0 = cx(i) - bw / 2, r = Math.min(4, (b1 - top) / 2);
+      g1 += '<path class="wk-bar' + (x.target_total && v >= x.target_total ? ' hit' : '') + (x.current ? ' cur' : '') + '" d="M' + x0.toFixed(1) + ',' + b1 +
+        ' V' + (top + r).toFixed(1) + ' Q' + x0.toFixed(1) + ',' + top.toFixed(1) + ' ' + (x0 + r).toFixed(1) + ',' + top.toFixed(1) +
+        ' H' + (x0 + bw - r).toFixed(1) + ' Q' + (x0 + bw).toFixed(1) + ',' + top.toFixed(1) + ' ' + (x0 + bw).toFixed(1) + ',' + (top + r).toFixed(1) +
+        ' V' + b1 + ' Z"/>';
+    }
+    if (x.target_total && (v > 0 || x.current)) {
+      g1 += '<line class="wk-target" x1="' + (cx(i) - bw / 2 - 3).toFixed(1) + '" x2="' + (cx(i) + bw / 2 + 3).toFixed(1) +
+        '" y1="' + y1(x.target_total).toFixed(1) + '" y2="' + y1(x.target_total).toFixed(1) + '"/>';
+    }
+  });
+
+  // แผงล่าง: น้ำหนัก
+  const H2 = 96, t2 = 20, b2 = H2 - 18, off = H1 + 6;
+  const ws = weeks.map(x => x.weight_avg).filter(v => v != null);
+  let lo = ws.length ? Math.min.apply(null, ws) : 50, hi = ws.length ? Math.max.apply(null, ws) : 60;
+  if (hi - lo < 0.6) { const m = (hi + lo) / 2; lo = m - 0.3; hi = m + 0.3; }
+  const y2 = v => off + t2 + (hi - v) / (hi - lo) * (b2 - t2);
+  let g2 = '<text class="lbl ptitle" x="0" y="' + (off + 11) + '">น้ำหนักเฉลี่ย (กก.)</text>';
+  [hi, lo].forEach(v => {
+    g2 += '<line class="grid" x1="' + pl + '" x2="' + (W - pr) + '" y1="' + y2(v).toFixed(1) + '" y2="' + y2(v).toFixed(1) + '"/>' +
+      '<text class="lbl" x="' + (pl - 5) + '" y="' + (y2(v) + 3).toFixed(1) + '" text-anchor="end">' + v.toFixed(1) + '</text>';
+  });
+  let seg = [], lines = '';
+  weeks.forEach((x, i) => {
+    if (x.weight_avg != null) seg.push(cx(i).toFixed(1) + ',' + y2(x.weight_avg).toFixed(1));
+    if (x.weight_avg == null || i === n - 1) { if (seg.length > 1) lines += '<polyline class="avg" points="' + seg.join(' ') + '"/>'; seg = x.weight_avg == null ? [] : seg; }
+  });
+  g2 += lines + weeks.map((x, i) => x.weight_avg == null ? '' :
+    '<circle class="wk-dot" cx="' + cx(i).toFixed(1) + '" cy="' + y2(x.weight_avg).toFixed(1) + '" r="4"/>').join('');
+  g2 += weeks.map((x, i) => (i % 2 === (n - 1) % 2) ?
+    '<text class="lbl" x="' + cx(i).toFixed(1) + '" y="' + (off + H2 - 3) + '" text-anchor="middle">' + (x.current ? 'นี้' : esc(thDate(x.week_start))) + '</text>' : '').join('');
+
+  const hits = weeks.map((x, i) => '<rect class="hit-area" data-act="wk-tip" data-i="' + i + '" x="' + (pl + band * i).toFixed(1) +
+    '" y="0" width="' + band.toFixed(1) + '" height="' + (H1 + 6 + H2) + '"/>').join('');
+
+  return '<svg class="chart wk-chart" viewBox="0 0 ' + W + ' ' + (H1 + 6 + H2) + '" role="img" aria-label="กราฟแคลรวมและน้ำหนักเฉลี่ยรายสัปดาห์">' +
+    g1 + g2 + hits + '</svg>' +
+    '<div class="legend"><span><i class="lg-bar"></i>แคลรวม</span><span><i class="lg-bar hit"></i>ถึงเป้า</span><span><i class="lg-tick"></i>เป้าสัปดาห์</span>' +
+    '<span><i class="lg-line"></i>น้ำหนักเฉลี่ย</span></div>' +
+    '<p class="wk-tip" id="wk-tip">' + weekTipText(n - 1) + '</p>';
+}
+
+function weekTipText(i) {
+  const x = (S.chartWeeks || [])[i];
+  if (!x) return '';
+  return '<b>' + (x.current ? 'สัปดาห์นี้' : 'สัปดาห์ ' + esc(thDate(x.week_start))) + '</b> · แผน ' + esc(x.plan) +
+    ' · กิน ' + (x.kcal_total ? fmtN(x.kcal_total) : '–') + (x.target_total ? ' / ' + fmtN(x.target_total) : '') + ' kcal' +
+    ' · น้ำหนัก ' + fmtKg(x.weight_avg) + ' กก.' + (x.party_days ? ' · 🍻 ' + x.party_days + ' วัน' : '') +
+    '<br><span class="muted small">แตะแท่งอื่นเพื่อดูสัปดาห์นั้น</span>';
 }
 
 function renderSummary() {
@@ -684,7 +1098,7 @@ function renderSummary() {
   const diffTxt = wd == null ? 'ยังเทียบไม่ได้'
     : wd > 0 ? '📈 +' + wd.toFixed(2) + ' กก.' : wd < 0 ? '📉 ' + wd.toFixed(2) + ' กก.' : '➖ เท่าเดิม';
 
-  const bars = w.days.map(d => {
+  const bars = mergedDays(w).map(d => {
     const party = d.day_type === 'party';
     const pct = d.target ? Math.min(d.total / d.target, 1) * 100 : 0;
     const hit = d.target && d.total >= d.target;
@@ -696,7 +1110,8 @@ function renderSummary() {
   let tip = '';
   if (ins) {
     const sg = ins.suggestion;
-    tip = '<section><h2>คำแนะนำ</h2><div class="tip ' + esc(sg.type) + '"><p>' + esc(sg.message) + '</p>' +
+    tip = (ins.current ? '<section><h2>แคล vs น้ำหนัก รายสัปดาห์</h2>' + weekChartHTML(ins) + '</section>' : '') +
+      '<section><h2>คำแนะนำ</h2><div class="tip ' + esc(sg.type) + '"><p>' + esc(sg.message) + '</p>' +
       (sg.new_target ? '<button class="btn" data-act="ins-apply" data-v="' + sg.new_target + '">ปรับเป้าเป็น ' + fmtN(sg.new_target) + ' kcal</button>' : '') +
       '</div>' +
       '<table class="tbl"><thead><tr><th>สัปดาห์</th><th>แผน</th><th>น้ำหนักเฉลี่ย</th><th>กินเฉลี่ย</th><th>🍻</th></tr></thead><tbody>' +
@@ -706,6 +1121,8 @@ function renderSummary() {
       '</tbody></table></section>';
   }
 
+  const weekHTML = weekBudgetHTML(w);
+
   view().innerHTML =
     '<header class="week-head"><button class="icon-btn" data-act="wk-go" data-d="-7" aria-label="สัปดาห์ก่อน">‹</button>' +
     '<div><h1><button class="date-btn" data-act="cal-open" data-mode="week" aria-label="เลือกสัปดาห์จากปฏิทิน">' +
@@ -713,14 +1130,32 @@ function renderSummary() {
     '<div class="day-sub">' + (thisWeek ? '<span>' + esc(thDate(w.week_start)) + ' ถึง ' + esc(thDate(w.week_end)) + '</span>' : '') +
     '<span class="plan-chip">แผน ' + esc(w.plan) + '</span></div></div>' +
     '<button class="icon-btn" data-act="wk-go" data-d="7" aria-label="สัปดาห์ถัดไป"' + (thisWeek ? ' disabled' : '') + '>›</button></header>' +
+    weekHTML +
     '<div class="stats">' +
     '<div class="stat"><b class="num">' + (w.kcal.avg ? fmtN(w.kcal.avg) : '–') + '</b><span>kcal เฉลี่ยต่อวัน</span></div>' +
     '<div class="stat"><b class="num">' + w.kcal.hit_days + '/' + w.kcal.counted_days + '</b><span>วันที่ถึงเป้า</span></div>' +
     '<div class="stat"><b class="num">' + fmtKg(w.weight.avg) + '</b><span>น้ำหนักเฉลี่ย (กก.)</span></div>' +
     '<div class="stat"><b class="fit num">' + diffTxt + '</b><span>เทียบสัปดาห์ก่อน</span></div>' +
-    '<div class="stat wide"><b>' + (w.party_days ? '🍻 ' + w.party_days + ' วัน' : 'ไม่ได้ไปปาร์ตี้ สัปดาห์กำไร 🎉') + '</b><span>วันปาร์ตี้</span></div>' +
+    '<div class="stat wide"><b class="fit">' + (w.party_days ? '🍻 ' + w.party_days + ' วัน' : 'ไม่ได้ไปปาร์ตี้ สัปดาห์กำไร 🎉') + '</b><span>วันปาร์ตี้</span></div>' +
     '</div>' +
     '<section><h2>รายวัน</h2><ul class="bars">' + bars + '</ul></section>' + tip;
+}
+
+/** งบแคลทั้งสัปดาห์ = รวมเป้าของแต่ละวัน (วันทำงาน + วันหยุดที่อยู่บ้าน, วันปาร์ตี้ไม่นับ) */
+function weekBudgetHTML(w) {
+  const b = weekBudget(w);
+  const pct = b.target ? Math.min(b.eaten / b.target, 1) * 100 : 0;
+  let note;
+  if (b.left <= 0) note = '<p class="wb-note ok">ถึงเป้าทั้งสัปดาห์แล้ว 🎉 เกินมา ' + fmtN(-b.left) + ' kcal</p>';
+  else if (b.thisWeek) {
+    note = '<p class="wb-note">ยังขาดอีก <b class="num">' + fmtN(b.left) + '</b> kcal' +
+      (b.daysLeft ? ' | วันทำงานที่เหลือ ' + b.daysLeft + ' วัน ≈ วันละ <b class="num">' + fmtN(b.perDay) + '</b>' : '') + '</p>';
+  } else note = '<p class="wb-note">ขาดไป <b class="num">' + fmtN(b.left) + '</b> kcal จากเป้าสัปดาห์</p>';
+  return '<div class="week-budget"><div class="wb-top"><span>กินรวมทั้งสัปดาห์</span>' +
+    '<span class="num"><b>' + fmtN(b.eaten) + '</b> / ' + fmtN(b.target) + ' kcal</span></div>' +
+    '<div class="bar wb-bar"><i class="' + (b.left <= 0 ? 'hit' : '') + '" style="width:' + pct.toFixed(0) + '%"></i></div>' + note +
+    '<p class="muted small" style="margin:4px 0 0">เป้า = รวมเป้าของ ' + b.workDays + ' วันทำงาน' +
+    (b.homeDays ? ' + ' + b.homeDays + ' วันหยุดที่อยู่บ้าน' : '') + ' (วันปาร์ตี้ไม่นับ)</p></div>';
 }
 
 async function applyTarget(v) {
@@ -728,9 +1163,9 @@ async function applyTarget(v) {
   try {
     const r = await api('updateSettings', { values: { weekday_target_kcal: v } });
     S.init.settings = r.settings;
-    S.day = null; S.insights = null;
+    invalidateDays(); S.weeks = {};
     toast('ปรับเป้าแล้ว');
-    loadSummary(false);
+    loadSummary();
   } catch (e) { /* toast แล้ว */ }
 }
 
@@ -820,6 +1255,8 @@ function renderSettings() {
     '<button class="btn btn-ghost btn-block" data-act="lib-open">เปิดคลังเมนู</button></div></section>' +
 
     '<section><h2>ความปลอดภัย</h2><div class="group" style="padding-top:14px">' +
+    '<button class="btn btn-ghost btn-block" data-act="reload-all">โหลดข้อมูลใหม่ทั้งหมด</button>' +
+    '<p class="muted small">ใช้เมื่อไปแก้ข้อมูลใน Google Sheets ตรง ๆ แล้วแอปยังไม่เห็น</p>' +
     '<button class="btn btn-ghost btn-block" data-act="pin-change">เปลี่ยน PIN</button>' +
     '<button class="btn btn-danger btn-block" style="margin-top:10px" data-act="logout">ออกจากระบบ</button></div></section>';
 }
@@ -837,7 +1274,7 @@ async function saveSettings() {
     S.init.settings = r.settings;
     S.anchorDraft = null;
     S.init.slots = values.meal_slots.split(',').map(s => s.trim()).filter(Boolean);
-    S.day = null; S.week = null; S.insights = null;
+    invalidateDays(); S.weeks = {};
     toast('บันทึกการตั้งค่าแล้ว');
     renderSettings();
   } catch (e) { /* toast แล้ว */ }
@@ -872,8 +1309,11 @@ function openFoodForm(id) {
     '<label class="field"><span>ชื่อเมนู</span><input id="ff-name" value="' + esc(f.name) + '"></label>' +
     '<div class="row2"><label class="field"><span>kcal ต่อหน่วย</span><input id="ff-kcal" type="number" inputmode="numeric" min="0" value="' + esc(f.kcal) + '"></label>' +
     '<label class="field"><span>หน่วย</span><input id="ff-unit" value="' + esc(f.unit) + '"></label></div>' +
-    '<label class="field"><span>หมวด</span><input id="ff-cat" list="ff-cats" value="' + esc(f.category) + '"><datalist id="ff-cats">' +
-    cats.map(c => '<option value="' + esc(c) + '">').join('') + '</datalist></label>' +
+    '<label class="field"><span>หมวด</span><select id="ff-cat" data-input="ff-cat-sel">' +
+    cats.concat(cats.indexOf(f.category) === -1 ? [f.category] : []).map(c =>
+      '<option' + (c === f.category ? ' selected' : '') + '>' + esc(c) + '</option>').join('') +
+    '<option value="__new">+ สร้างหมวดใหม่…</option></select></label>' +
+    '<label class="field" id="ff-cat-new" hidden><span>ชื่อหมวดใหม่</span><input id="ff-cat-name" placeholder="เช่น ขนม"></label>' +
     '<label class="field"><span>โน้ต</span><input id="ff-note" value="' + esc(f.note) + '" placeholder="เช่น ดูฉลาก"></label>' +
     '<label class="check"><input type="checkbox" id="ff-fav"' + (f.favorite ? ' checked' : '') + '> เมนูโปรด (ขึ้นก่อนในรายการ)</label>' +
     '<label class="check"><input type="checkbox" id="ff-active"' + (f.active ? ' checked' : '') + '> แสดงในรายการให้เลือก</label>' +
@@ -883,7 +1323,7 @@ function openFoodForm(id) {
 async function saveFood(id) {
   const fields = {
     name: $('#ff-name').value.trim(), kcal: Number($('#ff-kcal').value), unit: $('#ff-unit').value.trim() || 'ที่',
-    category: $('#ff-cat').value.trim() || 'อื่นๆ', note: $('#ff-note').value.trim(),
+    category: ($('#ff-cat').value === '__new' ? $('#ff-cat-name').value.trim() : $('#ff-cat').value) || 'อื่นๆ', note: $('#ff-note').value.trim(),
     favorite: $('#ff-fav').checked, active: $('#ff-active').checked
   };
   if (!fields.name) return toast('ใส่ชื่อเมนูก่อน', true);
@@ -891,7 +1331,7 @@ async function saveFood(id) {
   try {
     const r = id ? await api('updateFood', { id: id, fields: fields }) : await api('addFood', fields);
     S.init.foods = r.foods;
-    S.day = null;
+    invalidateDays();
     toast(id ? 'บันทึกเมนูแล้ว' : 'เพิ่มเมนูแล้ว');
     openLibrary();
   } catch (e) { /* toast แล้ว */ }
@@ -986,8 +1426,8 @@ function pickCalendar(date) {
   S.cal = null;
   closeSheet();
   if (mode === 'week') {
-    S.weekDate = date; S.week = null;
-    loadSummary(false);
+    S.weekDate = date;
+    loadSummary();
   } else {
     loadDay(date);
   }
@@ -1019,28 +1459,69 @@ const ACTS = {
   'cal-month': el => { S.cal.month = shiftMonth(S.cal.month, Number(el.dataset.d)); renderCal(); },
   'cal-pick': el => pickCalendar(el.dataset.date),
   'party-toggle': () => toggleParty(),
-  'plan-slot': async el => {
-    try { S.day = await api('logPlanSlot', { date: S.date, slot: el.dataset.slot }); renderToday(); toast('บันทึกตามแผนแล้ว'); } catch (e) {}
+  'plan-slot': el => {
+    const d = S.day, slot = el.dataset.slot;
+    const items = d.planned[slot] || [];
+    d.logs = d.logs.filter(l => l.slot !== slot).concat(toLogs(slot, items, 'plan'));
+    bumpUsage(items, d.date);
+    enqueue('logPlanSlot', { date: d.date, slot: slot }, { kind: 'day', date: d.date });
+    commitDay(d);
+    toast('บันทึกตามแผนแล้ว');
   },
-  'plan-day': async () => {
-    try { S.day = await api('logPlanDay', { date: S.date }); renderToday(); toast('บันทึกทั้งวันแล้ว'); } catch (e) {}
+  'plan-day': () => {
+    const d = S.day;
+    Object.keys(d.planned).filter(s => !d.logs.some(l => l.slot === s)).forEach(slot => {
+      d.logs = d.logs.concat(toLogs(slot, d.planned[slot], 'plan'));
+      bumpUsage(d.planned[slot], d.date);
+      enqueue('logPlanSlot', { date: d.date, slot: slot }, { kind: 'day', date: d.date });
+    });
+    commitDay(d);
+    toast('บันทึกมื้อที่เหลือตามแผนแล้ว');
+  },
+  'fill-open': () => openFill(),
+  'fill-add': el => addFill(Number(el.dataset.i)),
+  'week-open': el => { S.weekDate = el.dataset.date; goTab('summary'); },
+  'wk-tip': el => { const t = $('#wk-tip'); if (t) t.innerHTML = weekTipText(Number(el.dataset.i)); },
+  'reload-all': async () => {
+    try {
+      await api('refreshCache');
+      invalidateDays(); S.weeks = {};
+      await loadBundle();
+      renderSettings();
+      toast('โหลดข้อมูลใหม่แล้ว');
+    } catch (e) { /* toast แล้ว */ }
   },
   'change-slot': el => {
     const slot = el.dataset.slot;
     const logs = S.day.logs.filter(l => l.slot === slot);
-    const src = logs.length ? logs : (S.day.planned[slot] || []);
-    const cart = src.map(x => x.food_id
+    // กินอย่างอื่น = เริ่มจากรายการว่าง | แก้มื้อนี้ = เอาของที่บันทึกไว้มาแก้
+    const cart = logs.map(x => x.food_id
       ? { food_id: x.food_id, name: x.name, kcal_unit: x.kcal_unit, qty: x.qty }
       : { name: x.name, kcal_unit: x.kcal_unit, qty: x.qty, custom: true, save_to_db: false });
-    openPicker({ mode: 'replace', slot: slot, date: S.date, cart: cart, title: 'มื้อ' + slot });
+    openPicker({ mode: 'replace', slot: slot, date: S.date, cart: cart, planned: S.day.planned[slot] || [], hadLogs: logs.length > 0,
+      title: (logs.length ? 'แก้มื้อ' : 'กินอย่างอื่น มื้อ') + slot });
   },
   'add-slot': el => openPicker({ mode: 'add', slot: el.dataset.slot, date: S.date, title: 'เพิ่มเข้ามื้อ' + el.dataset.slot }),
-  'del-log': async el => {
+  'del-log': el => {
     if (!confirm('ลบรายการนี้?')) return;
-    try { S.day = await api('deleteLog', { log_id: el.dataset.id }); renderToday(); } catch (e) {}
+    const d = S.day, id = el.dataset.id;
+    const item = d.logs.find(l => l.log_id === id);
+    if (!item) return;
+    d.logs = d.logs.filter(l => l.log_id !== id);
+    if (id.indexOf('tmp_') === 0) {          // ยังไม่ได้ส่งถึงชีท → ส่งมื้อนั้นใหม่ทั้งมื้อ
+      const rest = d.logs.filter(l => l.slot === item.slot).map(l => l.food_id
+        ? { food_id: l.food_id, qty: l.qty } : { name: l.name, kcal: l.kcal_unit, qty: l.qty });
+      enqueue('replaceSlot', { date: d.date, slot: item.slot, items: rest }, { kind: 'day', date: d.date });
+    } else {
+      enqueue('deleteLog', { log_id: id }, { kind: 'day', date: d.date });
+    }
+    commitDay(d);
   },
 
-  'pk-cat': el => { P.cat = el.dataset.cat; P.q = ''; $('.search').value = ''; renderPicker(); },
+  'pk-use-plan': () => {
+    P.cart = P.planned.map(x => ({ food_id: x.food_id, name: x.name, kcal_unit: x.kcal_unit, qty: x.qty }));
+    renderPicker();
+  },
   'pk-add': el => pickerAdd(el.dataset.id),
   'pk-qty': el => pickerQty(Number(el.dataset.i), Number(el.dataset.d)),
   'pk-custom-open': () => { P.custom = true; P.customName = P.q; renderCustom(); $('#ck-name').focus(); },
@@ -1066,14 +1547,11 @@ const ACTS = {
     try { S.weights = await api('getWeights', { days: S.weightsRange }); } catch (e) { return; }
     renderProgress();
   },
-  'w-del': async el => {
+  'w-del': el => {
     if (!confirm('ลบน้ำหนักวันที่ ' + el.dataset.date + '?')) return;
-    try {
-      await api('deleteWeight', { date: el.dataset.date });
-      S.weights = await api('getWeights', { days: S.weightsRange });
-      S.week = null; S.insights = null;
-      renderProgress();
-    } catch (e) {}
+    S.weights = (S.weights || []).filter(w => w.date !== el.dataset.date);
+    enqueue('deleteWeight', { date: el.dataset.date }, { kind: 'weight' });
+    renderProgress();
   },
   'ph-pick': () => $('#ph-file').click(),
   'ph-compare': () => { S.compareMode = !S.compareMode; S.compareSel = []; renderProgress(); },
@@ -1087,7 +1565,7 @@ const ACTS = {
     } catch (e) {}
   },
 
-  'wk-go': el => { S.weekDate = addDays(S.week.week_start, Number(el.dataset.d)); S.week = null; loadSummary(false); },
+  'wk-go': el => { S.weekDate = addDays(S.week.week_start, Number(el.dataset.d)); loadSummary(); },
   'ins-apply': el => applyTarget(Number(el.dataset.v)),
 
   'plan-sel': el => { S.planSel = { plan: el.dataset.plan, weekday: S.planSel.weekday, isNew: !!el.dataset.new }; renderSettings(); },
@@ -1108,7 +1586,7 @@ const ACTS = {
   'pin-change': () => openPinChange(),
   'pin-change-save': () => savePinChange(),
   'logout': async () => {
-    if (!confirm('ออกจากระบบ?')) return;
+    if (!confirm(Q.list.length ? 'ยังมีข้อมูลรอส่ง ' + Q.list.length + ' รายการ (จะส่งต่อหลังใส่ PIN ครั้งหน้า) ออกจากระบบ?' : 'ออกจากระบบ?')) return;
     try { await api('logout', {}, { silent: true }); } catch (e) {}
     logoutLocal();
   }
@@ -1128,6 +1606,18 @@ document.addEventListener('input', e => {
   if (k === 'rot' && $('#anchor-hint')) $('#anchor-hint').innerHTML = anchorHint();
 });
 
+document.addEventListener('change', e => {
+  const k = e.target.dataset && e.target.dataset.input;
+  if (k === 'pk-cat' && P) { P.cat = e.target.value; renderPicker(); }
+  if (k === 'pk-sort' && P) {
+    P.sort = e.target.value;
+    S.init.settings.food_sort = P.sort;
+    renderPicker();
+    api('updateSettings', { values: { food_sort: P.sort } }, { silent: true, quiet: true }).catch(() => {});
+  }
+  if (k === 'ff-cat-sel') $('#ff-cat-new').hidden = e.target.value !== '__new';
+});
+
 document.addEventListener('keydown', e => {
   if (!$('#pin').hidden) {
     if (/^\d$/.test(e.key)) pressKey(e.key);
@@ -1141,10 +1631,11 @@ document.addEventListener('keydown', e => {
 let lastSeen = todayISO();
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible' || !S.init) return;
+  runQueue();
   const t = todayISO();
   if (t !== lastSeen) {
     lastSeen = t;
-    S.week = null; S.insights = null;
+    S.weekDate = t;
     if (S.tab === 'today') loadDay(t); else S.date = t;
   }
 });

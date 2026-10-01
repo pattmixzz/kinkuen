@@ -1,5 +1,5 @@
 // Service worker: เก็บไฟล์หน้าเว็บไว้ในเครื่อง เปิดเร็วขึ้น (ไม่แคชข้อมูลจาก API)
-const CACHE = 'kinkuen-v5';
+const CACHE = 'kinkuen-v7';
 const SHELL = ['./', 'index.html', 'app.css', 'app.js', 'config.js', 'manifest.webmanifest',
   'icon-192.png', 'apple-touch-icon.png'];
 
