@@ -504,12 +504,12 @@ async function toggleParty() {
 }
 
 // ======================= ตัวเลือกเมนู (picker) =======================
-const SORTS = [['fav', '⭐ โปรดก่อน'], ['freq', 'กินบ่อยสุด'], ['recent', 'กินล่าสุด'], ['least', 'กินน้อยสุด / ไม่เคยกิน'],
+const SORTS = [['freq', 'กินบ่อยสุด'], ['recent', 'กินล่าสุด'], ['least', 'กินน้อยสุด / ไม่เคยกิน'],
   ['az', 'ก–ฮ'], ['kcal_desc', 'แคลมาก → น้อย'], ['kcal_asc', 'แคลน้อย → มาก']];
 
 function openPicker(opt) {
-  const sort = (S.init.settings.food_sort && SORTS.some(x => x[0] === S.init.settings.food_sort)) ? S.init.settings.food_sort : 'fav';
-  P = Object.assign({ q: '', cat: sort === 'fav' ? 'fav' : 'all', sort: sort, cart: [], custom: false, customName: '' }, opt);
+  const sort = SORTS.some(x => x[0] === S.init.settings.food_sort) ? S.init.settings.food_sort : 'freq';
+  P = Object.assign({ q: '', cat: 'fav', sort: sort, cart: [], custom: false, customName: '' }, opt);
   openSheet(opt.title,
     '<input class="search" type="search" placeholder="ค้นหาเมนู เช่น กะเพรา" data-input="pk-q" aria-label="ค้นหาเมนู" autocomplete="off">' +
     '<div class="row2 pk-cat-field"><label class="field"><span>หมวด</span><select id="pk-cats" data-input="pk-cat" aria-label="เลือกหมวด"></select></label>' +
