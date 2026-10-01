@@ -349,6 +349,18 @@ function showApp() {
 }
 
 // ======================= navigation =======================
+/** เด้งไปบนสุด (ทำซ้ำหลังวาดหน้าเสร็จ กันมือถือบางรุ่นค้างตำแหน่งเดิม) */
+function toTop() {
+  const go = () => {
+    window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
+    if (document.scrollingElement) document.scrollingElement.scrollTop = 0;
+    document.documentElement.scrollTop = 0;
+    document.body.scrollTop = 0;
+  };
+  go();
+  requestAnimationFrame(() => { go(); setTimeout(go, 60); });
+}
+
 function goTab(tab, force) {
   const same = S.tab === tab;
   S.tab = tab;
@@ -356,11 +368,12 @@ function goTab(tab, force) {
     if (b.dataset.tab === tab) b.setAttribute('aria-current', 'page');
     else b.removeAttribute('aria-current');
   });
-  window.scrollTo(0, 0);
+  closeSheet();
   if (tab === 'today') loadDay(S.date);
-  if (tab === 'progress') loadProgress();
+  if (tab === 'progress') { S.wShow = 7; loadProgress(); }
   if (tab === 'summary') loadSummary();
   if (tab === 'settings') renderSettings();
+  toTop();
 }
 
 // ======================= วันนี้ =======================
@@ -839,11 +852,12 @@ function renderProgress() {
     (S.compareMode ? '<p class="muted small">แตะเลือก 2 รูปที่อยากเทียบ</p>' : '') + gallery + '</section>' +
 
     '<section><h2>บันทึกล่าสุด</h2>' + (ws.length
-      ? '<ul class="wlist">' + ws.slice(-10).reverse().map(w =>
+      ? '<ul class="wlist">' + ws.slice(-(S.wShow || 7)).reverse().map(w =>
         '<li><span>' + esc(thDate(w.date, { weekday: 'short', day: 'numeric', month: 'short' })) +
         (w.flag === 'post_party' ? '<span class="flag">หลังปาร์ตี้</span>' : '') + '</span>' +
         '<span class="num">' + fmtKg(w.weight_kg) + ' กก.</span>' +
-        '<button class="x" data-act="w-del" data-date="' + w.date + '" aria-label="ลบน้ำหนักวันที่ ' + w.date + '">✕</button></li>').join('') + '</ul>'
+        '<button class="x" data-act="w-del" data-date="' + w.date + '" aria-label="ลบน้ำหนักวันที่ ' + w.date + '">✕</button></li>').join('') + '</ul>' +
+        (ws.length > (S.wShow || 7) ? '<button class="link-btn" data-act="w-more">ดูเพิ่มอีก 7 รายการ</button>' : '')
       : '<p class="empty">ยังไม่มีข้อมูล เริ่มชั่งพรุ่งนี้เช้าได้เลย</p>') + '</section>';
 
   $('#ph-file').addEventListener('change', onPhotoFile);
@@ -1451,6 +1465,7 @@ function pickCalendar(date) {
   } else {
     loadDay(date);
   }
+  toTop();
 }
 
 // ======================= sheet =======================
@@ -1473,8 +1488,8 @@ const ACTS = {
   'key': el => pressKey(el.dataset.k),
   'sheet-close': () => closeSheet(),
 
-  'day-go': el => loadDay(addDays(S.date, Number(el.dataset.d))),
-  'day-today': () => loadDay(todayISO()),
+  'day-go': el => { loadDay(addDays(S.date, Number(el.dataset.d))); toTop(); },
+  'day-today': () => { loadDay(todayISO()); toTop(); },
   'cal-open': el => openCalendar(el.dataset.mode),
   'cal-month': el => { S.cal.month = shiftMonth(S.cal.month, Number(el.dataset.d)); renderCal(); },
   'cal-pick': el => pickCalendar(el.dataset.date),
@@ -1549,6 +1564,7 @@ const ACTS = {
   'pk-save': () => pickerSave(),
 
   'w-save': () => saveWeight(),
+  'w-more': () => { S.wShow = (S.wShow || 7) + 7; renderProgress(); },
   'w-date': el => {
     S.wDate = addDays(S.wDate, Number(el.dataset.d));
     if (S.wDate > todayISO()) S.wDate = todayISO();
@@ -1585,7 +1601,7 @@ const ACTS = {
     } catch (e) {}
   },
 
-  'wk-go': el => { S.weekDate = addDays(S.week.week_start, Number(el.dataset.d)); loadSummary(); },
+  'wk-go': el => { S.weekDate = addDays(S.week.week_start, Number(el.dataset.d)); loadSummary(); toTop(); },
   'ins-apply': el => applyTarget(Number(el.dataset.v)),
 
   'plan-sel': el => { S.planSel = { plan: el.dataset.plan, weekday: S.planSel.weekday, isNew: !!el.dataset.new }; renderSettings(); },
