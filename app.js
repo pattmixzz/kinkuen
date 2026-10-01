@@ -528,6 +528,10 @@ function pickerFoods() {
   if (q) list = list.filter(f => f.name.toLowerCase().indexOf(q) !== -1);
   else if (P.cat === 'fav') list = list.filter(f => f.favorite);
   else if (P.cat !== 'all') list = list.filter(f => f.category === P.cat);
+  return sortFoods(list, P.sort);
+}
+
+function sortFoods(list, sort) {
   const u = S.init.usage || {};
   const n = f => (u[f.id] ? u[f.id].n : 0);
   const last = f => (u[f.id] ? u[f.id].last : '');
@@ -540,13 +544,13 @@ function pickerFoods() {
     az: az,
     kcal_desc: (a, b) => (b.kcal - a.kcal) || az(a, b),
     kcal_asc: (a, b) => (a.kcal - b.kcal) || az(a, b)
-  }[P.sort] || az;
+  }[sort] || az;
   return list.sort(cmp);
 }
 
-function usageMeta(f) {
+function usageMeta(f, sort) {
   const x = (S.init.usage || {})[f.id];
-  if (['freq', 'recent', 'least'].indexOf(P.sort) === -1) return '';
+  if (['freq', 'recent', 'least'].indexOf(sort || (P && P.sort)) === -1) return '';
   return x ? ' | กินแล้ว ' + x.n + ' ครั้ง ล่าสุด ' + thDate(x.last) : ' | ยังไม่เคยกิน';
 }
 
@@ -1281,25 +1285,41 @@ async function saveSettings() {
 }
 
 // ---------- คลังเมนู ----------
-let libQ = '';
+let libQ = '', libCat = 'all', libSort = 'az';
 function openLibrary() {
   libQ = '';
+  libSort = SORTS.some(x => x[0] === S.init.settings.food_sort) ? S.init.settings.food_sort : 'az';
+  const cats = [];
+  S.init.foods.forEach(f => { if (cats.indexOf(f.category) === -1) cats.push(f.category); });
+  if (['all', 'fav', 'hidden'].indexOf(libCat) === -1 && cats.indexOf(libCat) === -1) libCat = 'all';
+  const count = c => S.init.foods.filter(f => c === 'all' || (c === 'fav' ? f.favorite : c === 'hidden' ? !f.active : f.category === c)).length;
+  const catOpts = [['all', 'ทั้งหมด'], ['fav', '⭐ โปรด']].concat(cats.map(c => [c, c])).concat([['hidden', '🙈 ที่ซ่อนอยู่']]);
   openSheet('คลังเมนู',
     '<input class="search" type="search" placeholder="ค้นหาเมนู" data-input="lib-q" aria-label="ค้นหาเมนู" autocomplete="off">' +
-    '<button class="btn btn-block" style="margin:10px 0" data-act="food-new">+ เพิ่มเมนูใหม่</button>' +
+    '<div class="row2 pk-cat-field"><label class="field"><span>หมวด</span><select data-input="lib-cat" aria-label="เลือกหมวด">' +
+    catOpts.map(c => '<option value="' + esc(c[0]) + '"' + (c[0] === libCat ? ' selected' : '') + '>' + esc(c[1]) + ' (' + count(c[0]) + ')</option>').join('') +
+    '</select></label><label class="field"><span>เรียงตาม</span><select data-input="lib-sort" aria-label="เรียงตาม">' +
+    SORTS.map(x => '<option value="' + x[0] + '"' + (x[0] === libSort ? ' selected' : '') + '>' + x[1] + '</option>').join('') +
+    '</select></label></div>' +
+    '<button class="btn btn-block" style="margin:4px 0 10px" data-act="food-new">+ เพิ่มเมนูใหม่</button>' +
     '<ul class="food-list" id="lib-list"></ul>');
   renderLibrary();
 }
 
 function renderLibrary() {
   const q = libQ.trim().toLowerCase();
-  const list = S.init.foods.filter(f => !q || f.name.toLowerCase().indexOf(q) !== -1)
-    .sort((a, b) => (b.active - a.active) || a.category.localeCompare(b.category, 'th') || a.name.localeCompare(b.name, 'th'));
+  let list = S.init.foods.slice();
+  if (q) list = list.filter(f => f.name.toLowerCase().indexOf(q) !== -1);       // ค้นหา = ค้นทุกหมวด
+  else if (libCat === 'fav') list = list.filter(f => f.favorite);
+  else if (libCat === 'hidden') list = list.filter(f => !f.active);
+  else if (libCat !== 'all') list = list.filter(f => f.category === libCat);
+  list = sortFoods(list, libSort);
+  if (libCat !== 'hidden') list.sort((a, b) => b.active - a.active);              // เมนูที่ซ่อนไว้ล่างสุด (sort คงลำดับเดิม)
   $('#lib-list').innerHTML = list.map(f =>
     '<li><button class="food-row' + (f.active ? '' : ' off') + '" data-act="food-edit" data-id="' + esc(f.id) + '">' +
     '<span>' + (f.favorite ? '⭐ ' : '') + esc(f.name) + '<span class="meta">' + esc(f.category) + ' | ต่อ 1 ' + esc(f.unit) +
-    (f.active ? '' : ' | ซ่อนอยู่') + '</span></span><span class="k num">' + fmtN(f.kcal) + '</span></button></li>').join('') ||
-    '<li class="empty">ไม่เจอเมนูนี้</li>';
+    (f.active ? '' : ' | ซ่อนอยู่') + esc(usageMeta(f, libSort)) + '</span></span><span class="k num">' + fmtN(f.kcal) + '</span></button></li>').join('') ||
+    '<li class="empty">' + (q ? 'ไม่เจอเมนูนี้' : 'หมวดนี้ยังไม่มีเมนู') + '</li>';
 }
 
 function openFoodForm(id) {
@@ -1609,6 +1629,8 @@ document.addEventListener('input', e => {
 document.addEventListener('change', e => {
   const k = e.target.dataset && e.target.dataset.input;
   if (k === 'pk-cat' && P) { P.cat = e.target.value; renderPicker(); }
+  if (k === 'lib-cat') { libCat = e.target.value; renderLibrary(); }
+  if (k === 'lib-sort') { libSort = e.target.value; renderLibrary(); }
   if (k === 'pk-sort' && P) {
     P.sort = e.target.value;
     S.init.settings.food_sort = P.sort;
