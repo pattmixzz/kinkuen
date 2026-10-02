@@ -280,6 +280,11 @@ function ensureHomeDay(d) {
   }
 }
 
+/** จำมื้อที่เพิ่งบันทึก ไว้ให้การ์ดโชว์ติ๊กเขียวเด้ง */
+function markSaved(date, slots) {
+  S.justSaved = { date: date, slots: slots, until: Date.now() + 1200 };
+}
+
 function commitDay(d) {
   recompute(d);
   setDay(d);
@@ -387,13 +392,45 @@ async function loadInit(quiet) {
 
 /** โหลดทุกอย่างในครั้งเดียวหลังใส่ PIN → สลับหน้าได้ทันทีไม่ต้องรอ */
 async function loadBundle() {
-  const r = await api('getBundle', { date: S.date, weight_days: S.weightsRange }, { wait: 'กำลังโหลดข้อมูล…' });
+  $('#pin').hidden = true;
+  $('#app').hidden = false;
+  view().innerHTML = skeleton(S.tab === 'settings' ? 'today' : S.tab);
+  const r = await api('getBundle', { date: S.date, weight_days: S.weightsRange });
   S.init = r.init;
   setDay(r.day);
   S.weeks[r.week.week_start] = r.week;
   S.insights = r.insights;
   S.weights = r.weights;
   S.photos = r.photos;
+}
+
+// ======================= skeleton (โครงหน้าตอนโหลด) =======================
+const SK = {
+  bar: (w, h) => '<span class="sk" style="width:' + w + ';height:' + (h || 14) + 'px"></span>',
+  card: inner => '<div class="sk-card">' + inner + '</div>'
+};
+function skeleton(tab) {
+  const b = SK.bar;
+  const slip = SK.card('<div class="sk-row"><span class="sk sk-ico"></span>' + b('38%', 18) + '<span class="sk-gap"></span>' + b('16%', 18) + '</div>' +
+    b('80%') + b('62%') + '<div class="sk-row">' + b('28%', 34) + b('28%', 34) + '</div>');
+  if (tab === 'today') {
+    return '<section class="hero sk-hero"><div class="sk-center">' + b('34%', 26) + b('46%', 18) +
+      '<span class="sk sk-plate"></span>' + b('58%', 30) + '</div></section>' +
+      SK.card('<div class="sk-row">' + b('30%') + '<span class="sk-gap"></span>' + b('34%', 18) + '</div>' + b('100%', 10) + b('70%')) +
+      slip + slip + slip;
+  }
+  if (tab === 'progress') {
+    return '<section class="hero hero-sm sk-hero">' + b('40%', 30) + b('55%') + '</section>' +
+      SK.card('<div class="sk-row">' + b('48%', 46) + b('48%', 46) + '</div>' + b('100%', 44)) +
+      SK.card(b('30%', 18) + '<span class="sk sk-chart"></span>') + SK.card(b('100%') + b('100%') + b('100%'));
+  }
+  if (tab === 'summary') {
+    return '<section class="hero hero-week sk-hero"><div class="sk-center">' + b('40%', 24) + b('52%') + '</div></section>' +
+      SK.card('<div class="sk-row">' + b('35%') + '<span class="sk-gap"></span>' + b('40%', 26) + '</div>' + b('100%', 12) + b('80%')) +
+      '<div class="stats">' + [1, 2, 3, 4].map(() => SK.card(b('55%', 26) + b('75%', 12))).join('') + '</div>' +
+      SK.card([1, 2, 3, 4, 5, 6, 7].map(() => '<div class="sk-row">' + b('14%') + b('64%', 10) + b('14%') + '</div>').join(''));
+  }
+  return '';
 }
 
 function showApp() {
@@ -436,10 +473,10 @@ async function loadDay(date) {
   const cached = S.days[date];
   S.day = cached || null;
   if (cached) renderToday();
-  else view().innerHTML = '<div class="hero hero-blank"></div>';
+  else view().innerHTML = skeleton(S.tab);
   if (pendingFor(date)) return;                       // มีของรอส่ง ใช้ข้อมูลในเครื่องไปก่อน
   let d;
-  try { d = await api('getDay', { date: date }, cached ? { silent: true, quiet: true } : { wait: 'กำลังโหลดข้อมูลวัน…' }); }
+  try { d = await api('getDay', { date: date }, cached ? { silent: true, quiet: true } : {}); }
   catch (e) {
     if (!cached && S.tab === 'today' && S.date === date) view().innerHTML = '<p class="empty">' + esc(e.message) + '</p>';
     return;
@@ -464,10 +501,89 @@ function plateSVG(total, target) {
   const pct = target ? Math.min(total / target, 1) : 0;
   const done = target && total >= target;
   return '<svg viewBox="0 0 220 220" class="plate' + (done ? ' done' : '') + '" aria-hidden="true">' +
+    '<defs><linearGradient id="gold" x1="0" y1="0" x2="1" y2="1">' +
+    '<stop offset="0" stop-color="#FFF4B8"/><stop offset=".45" stop-color="#FFD54A"/><stop offset="1" stop-color="#FFB300"/>' +
+    '</linearGradient></defs>' +
     '<circle cx="110" cy="110" r="' + r + '" class="rim-track"/>' +
     '<circle cx="110" cy="110" r="' + r + '" class="rim-fill" stroke-dasharray="' + C.toFixed(1) +
     '" stroke-dashoffset="' + (C * (1 - pct)).toFixed(1) + '" transform="rotate(-90 110 110)"/>' +
     '<circle cx="110" cy="110" r="80" class="plate-disk"/></svg>';
+}
+
+// ======================= แอนิเมชันจาน + พลุ =======================
+const reduceMotion = () => window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+let plateAnim = null;
+
+/** เลขในจานวิ่ง + วงแหวนหมุนเติม เมื่อแคลของวันเดียวกันเปลี่ยน, ถึงเป้าครั้งแรก → พลุ */
+function animatePlate(d) {
+  const prev = S.plateShown;
+  const target = d.target != null ? d.target : (Number(S.init.settings.home_day_target_kcal) || 0);
+  S.plateShown = { date: d.date, total: d.total, target: target, party: d.day_type === 'party' };
+  if (!prev || prev.date !== d.date || prev.party || d.day_type === 'party' || prev.total === d.total) return;
+
+  const svg = $('.plate'), num = $('.plate-total'), ring = $('.rim-fill');
+  if (!svg || !num || !ring) return;
+  const crossed = target > 0 && prev.total < target && d.total >= target;
+  if (reduceMotion()) { if (crossed) celebrate(); return; }
+
+  const C = 2 * Math.PI * 96;
+  const pct = v => (target ? Math.min(v / target, 1) : 0);
+  const to = ring.getAttribute('stroke-dashoffset');
+  ring.style.transition = 'none';
+  ring.setAttribute('stroke-dashoffset', (C * (1 - pct(prev.total))).toFixed(1));
+  if (crossed) svg.classList.remove('done');
+  void ring.getBoundingClientRect();
+  ring.style.transition = '';
+  requestAnimationFrame(() => ring.setAttribute('stroke-dashoffset', to));
+
+  cancelAnimationFrame(plateAnim);
+  const from = prev.total, end = d.total, t0 = performance.now(), dur = 900;
+  const step = now => {
+    const t = Math.min((now - t0) / dur, 1);
+    const e = 1 - Math.pow(1 - t, 3);
+    num.textContent = fmtN(from + (end - from) * e);
+    if (t < 1) plateAnim = requestAnimationFrame(step);
+    else if (crossed) { svg.classList.add('done', 'just-done'); celebrate(); }
+  };
+  num.classList.add('counting');
+  plateAnim = requestAnimationFrame(step);
+  setTimeout(() => num.classList.remove('counting'), dur);
+}
+
+/** คอนเฟตติ (canvas เต็มจอ ~2.5 วิ) */
+function celebrate() {
+  toast('🎉 ถึงเป้าวันนี้แล้ว!');
+  if (reduceMotion()) return;
+  const cv = document.createElement('canvas');
+  cv.className = 'confetti';
+  document.body.appendChild(cv);
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const W = cv.width = innerWidth * dpr, H = cv.height = innerHeight * dpr;
+  const ctx = cv.getContext('2d');
+  const colors = ['#E8461F', '#F2711C', '#F9A826', '#FFD54A', '#16A34A', '#4F46E5', '#FF5C8A'];
+  const plate = $('.plate'), r = plate ? plate.getBoundingClientRect() : { left: innerWidth / 2, top: innerHeight / 3, width: 0, height: 0 };
+  const ox = (r.left + r.width / 2) * dpr, oy = (r.top + r.height / 2) * dpr;
+  const parts = Array.from({ length: 140 }, () => {
+    const a = -Math.PI / 2 + (Math.random() - .5) * Math.PI * 1.3, v = (7 + Math.random() * 10) * dpr;
+    return { x: ox, y: oy, vx: Math.cos(a) * v, vy: Math.sin(a) * v, w: (5 + Math.random() * 6) * dpr, h: (8 + Math.random() * 8) * dpr,
+      rot: Math.random() * 6, vr: (Math.random() - .5) * .4, c: colors[Math.floor(Math.random() * colors.length)], round: Math.random() < .3 };
+  });
+  const t0 = performance.now();
+  const frame = now => {
+    const el = now - t0;
+    ctx.clearRect(0, 0, W, H);
+    ctx.globalAlpha = el > 1800 ? Math.max(0, 1 - (el - 1800) / 700) : 1;
+    parts.forEach(p => {
+      p.vy += .32 * dpr; p.vx *= .985; p.vy *= .985;
+      p.x += p.vx; p.y += p.vy; p.rot += p.vr;
+      ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.rot); ctx.fillStyle = p.c;
+      if (p.round) { ctx.beginPath(); ctx.arc(0, 0, p.w / 2, 0, 7); ctx.fill(); }
+      else ctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h * Math.abs(Math.cos(p.rot * 2)) + 2);
+      ctx.restore();
+    });
+    if (el < 2500) requestAnimationFrame(frame); else cv.remove();
+  };
+  requestAnimationFrame(frame);
 }
 
 function renderToday() {
@@ -518,6 +634,8 @@ function renderToday() {
   }
 
   view().innerHTML = '<section class="hero">' + head + seg + hero + '</section>' + below + slips;
+  animatePlate(d);
+  S.justSaved = null;          // ติ๊กเขียวเด้งแค่ครั้งเดียว
 }
 
 function slotIcon(slot) {
@@ -556,7 +674,10 @@ function slipHTML(slot, d) {
   actions.push('<button class="btn btn-ghost" data-act="change-slot" data-slot="' + s + '">' + (logged ? 'แก้มื้อนี้' : 'กินอย่างอื่น') + '</button>');
   if (logged) actions.push('<button class="btn btn-ghost" data-act="add-slot" data-slot="' + s + '">เพิ่ม</button>');
 
-  return '<article class="slip' + (logged ? ' is-done' : '') + '">' +
+  const js = S.justSaved;
+  const pop = js && js.date === d.date && js.slots.indexOf(slot) !== -1 && Date.now() < js.until;
+  return '<article class="slip' + (logged ? ' is-done' : '') + (pop ? ' pop' : '') + '">' +
+    (pop ? '<span class="slip-check" aria-hidden="true">✓</span>' : '') +
     '<header class="slip-head"><span class="slip-ico" aria-hidden="true">' + slotIcon(slot) + '</span>' +
     '<h3>' + s + (fromPlan ? ' <span class="src-tag">ตามแผน</span>' : (logged ? ' <span class="src-tag">✓</span>' : '')) + '</h3>' + right + '</header>' +
     body + '<div class="slip-actions">' + actions.join('') + '</div></article>';
@@ -742,6 +863,7 @@ async function pickerSave() {
         { kind: 'day', date: date, reloadInit: items.some(i => i.save_to_db) });
       ensureHomeDay(d);
       closeSheet();
+      if (items.length) markSaved(date, [slot]);
       commitDay(d);
     }
   } catch (e) { /* toast แสดงแล้ว */ }
@@ -819,17 +941,18 @@ function addFill(i) {
   enqueue('addLog', { date: d.date, slot: slot, items: o.items.map(x => ({ food_id: x.food_id, qty: x.qty })) }, { kind: 'day', date: d.date });
   ensureHomeDay(d);
   closeSheet();
+  markSaved(d.date, [slot]);
   commitDay(d);
 }
 
 // ======================= น้ำหนัก + รูป =======================
 async function loadProgress() {
   const cached = !!S.weights;
-  if (!cached) view().innerHTML = '<div class="hero hero-blank"></div>';
+  if (!cached) view().innerHTML = skeleton(S.tab);
   else renderProgress();
   if (Q.list.some(o => o.kind === 'weight')) return;
   try {
-    const o = cached ? { silent: true, quiet: true } : { wait: 'กำลังโหลดน้ำหนัก…' };
+    const o = cached ? { silent: true, quiet: true } : {};
     const r = await Promise.all([api('getWeights', { days: S.weightsRange }, o), api('listPhotos', {}, o)]);
     S.weights = r[0]; S.photos = r[1];
   } catch (e) { return; }
@@ -1034,10 +1157,10 @@ async function loadSummary() {
   const mon = mondayOf(S.weekDate);
   S.week = S.weeks[mon] || null;
   if (S.week) renderSummary();
-  else view().innerHTML = '<div class="hero hero-blank"></div>';
+  else view().innerHTML = skeleton(S.tab);
   let r;
   try {
-    const o = S.week ? { silent: true, quiet: true } : { wait: 'กำลังโหลดสรุป…' };
+    const o = S.week ? { silent: true, quiet: true } : {};
     r = await Promise.all([api('getWeek', { date: mon }, o), api('getInsights', { weeks: 8 }, { silent: true, quiet: true })]);
   } catch (e) { return; }
   S.weeks[r[0].week_start] = r[0];
@@ -1558,11 +1681,14 @@ const ACTS = {
     d.logs = d.logs.filter(l => l.slot !== slot).concat(toLogs(slot, items, 'plan'));
     bumpUsage(items, d.date);
     enqueue('logPlanSlot', { date: d.date, slot: slot }, { kind: 'day', date: d.date });
+    markSaved(d.date, [slot]);
     commitDay(d);
   },
   'plan-day': () => {
     const d = S.day;
-    Object.keys(d.planned).filter(s => !d.logs.some(l => l.slot === s)).forEach(slot => {
+    const todo = Object.keys(d.planned).filter(s => !d.logs.some(l => l.slot === s));
+    markSaved(d.date, todo);
+    todo.forEach(slot => {
       d.logs = d.logs.concat(toLogs(slot, d.planned[slot], 'plan'));
       bumpUsage(d.planned[slot], d.date);
       enqueue('logPlanSlot', { date: d.date, slot: slot }, { kind: 'day', date: d.date });

@@ -604,6 +604,70 @@ section:has(> .chart), section:has(> .wk-chart) {
 .setup-msg { max-width: 420px; margin: 20vh auto 0; padding: 20px; text-align: center; }
 .setup-msg code { background: var(--brand-soft); padding: 2px 6px; border-radius: 4px; }
 
+/* ---------- skeleton ---------- */
+.sk {
+  display: block; border-radius: 8px; margin: 8px 0;
+  background: linear-gradient(90deg, var(--surface-2) 0%, var(--line) 40%, var(--surface-2) 80%);
+  background-size: 300% 100%; animation: sk 1.3s ease-in-out infinite;
+}
+.sk-hero .sk { background: linear-gradient(90deg, rgba(255,255,255,.18) 0%, rgba(255,255,255,.38) 40%, rgba(255,255,255,.18) 80%); background-size: 300% 100%; }
+.sk-center { display: flex; flex-direction: column; align-items: center; }
+.sk-plate { width: min(200px, 56vw); aspect-ratio: 1; border-radius: 50%; margin: 18px auto 10px; }
+.sk-card { background: var(--surface); border-radius: var(--r-card); padding: 12px 16px; margin-top: 14px; box-shadow: var(--shadow); }
+.hero + .sk-card { margin-top: -32px; position: relative; z-index: 2; }
+.sk-card .sk:first-child { margin-top: 4px; }
+.sk-row { display: flex; align-items: center; gap: 10px; }
+.sk-row .sk { flex: none; }
+.sk-gap { flex: 1; }
+.sk-ico { width: 38px; height: 38px; border-radius: 12px; }
+.sk-chart { height: 150px; }
+.stats .sk-card { margin-top: 0; }
+@keyframes sk { from { background-position: 100% 0; } to { background-position: -50% 0; } }
+
+/* ---------- จาน: ถึงเป้า = วงแหวนทอง ---------- */
+.plate.done .rim-fill { stroke: url(#gold); filter: drop-shadow(0 0 6px rgba(255, 213, 74, .85)); }
+.plate.done .rim-track { stroke: rgba(255, 236, 160, .35); }
+.plate.just-done { animation: plate-pop .6s cubic-bezier(.3, 1.6, .5, 1); }
+@keyframes plate-pop { 40% { transform: scale(1.06); } }
+.plate-total.counting { color: var(--brand-ink); }
+.plate.done + .plate-center .plate-total { color: #B7791F; }
+@media (prefers-color-scheme: dark) { .plate.done + .plate-center .plate-total { color: #FFD54A; } }
+.confetti { position: fixed; inset: 0; width: 100vw; height: 100vh; z-index: 85; pointer-events: none; }
+
+/* ---------- การ์ดที่เพิ่งบันทึก: ติ๊กเขียวเด้ง ---------- */
+.slip.pop { animation: slip-pop .45s cubic-bezier(.3, 1.4, .5, 1); }
+@keyframes slip-pop { 0% { transform: scale(.97); } 60% { transform: scale(1.015); } }
+.slip-check {
+  position: absolute; z-index: 3; right: 14px; top: -12px;
+  width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--ok); color: #fff; font-weight: 700; font-size: 18px;
+  box-shadow: 0 6px 14px rgba(22, 163, 74, .4);
+  animation: check-pop 1.3s cubic-bezier(.3, 1.6, .5, 1) forwards;
+}
+@keyframes check-pop {
+  0% { transform: scale(0) rotate(-30deg); opacity: 0; }
+  25% { transform: scale(1.2) rotate(0); opacity: 1; }
+  40%, 75% { transform: scale(1); opacity: 1; }
+  100% { transform: scale(.6) translateY(-6px); opacity: 0; }
+}
+
+/* ---------- หน้า PIN: แอนิเมชันตอนเปิด ---------- */
+#pin:not([hidden]) .pin-logo { animation: logo-in .7s cubic-bezier(.3, 1.5, .5, 1) both; }
+#pin:not([hidden]) .logo-line { stroke-dasharray: 132; stroke-dashoffset: 132; animation: draw .7s .35s ease-out forwards; }
+#pin:not([hidden]) .logo-up { stroke-dasharray: 34; stroke-dashoffset: 34; animation: draw .45s .6s ease-out forwards, arrow-hop .5s 1.05s ease-in-out; }
+#pin:not([hidden]) .pin-box h1 { animation: rise .5s .25s ease-out both; }
+#pin:not([hidden]) .pin-hint, #pin:not([hidden]) .pin-dots { animation: rise .5s .35s ease-out both; }
+#pin:not([hidden]) .keypad button { animation: rise .45s ease-out both; }
+#pin:not([hidden]) .keypad button:nth-child(1), #pin:not([hidden]) .keypad button:nth-child(2), #pin:not([hidden]) .keypad button:nth-child(3) { animation-delay: .4s; }
+#pin:not([hidden]) .keypad button:nth-child(4), #pin:not([hidden]) .keypad button:nth-child(5), #pin:not([hidden]) .keypad button:nth-child(6) { animation-delay: .47s; }
+#pin:not([hidden]) .keypad button:nth-child(7), #pin:not([hidden]) .keypad button:nth-child(8), #pin:not([hidden]) .keypad button:nth-child(9) { animation-delay: .54s; }
+#pin:not([hidden]) .keypad button:nth-child(n+10) { animation-delay: .61s; }
+.pin-logo path, .pin-logo circle { transform-box: fill-box; transform-origin: center; }
+@keyframes logo-in { 0% { transform: scale(.3) rotate(-90deg); opacity: 0; } 100% { transform: none; opacity: 1; } }
+@keyframes draw { to { stroke-dashoffset: 0; } }
+@keyframes arrow-hop { 50% { transform: translateY(-4px); } }
+@keyframes rise { from { transform: translateY(14px); opacity: 0; } to { transform: none; opacity: 1; } }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition: none !important; }
   .spinner { animation: spin 1.6s linear infinite !important; }
