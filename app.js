@@ -178,7 +178,8 @@ function onOpDone(op, data) {
     setDay(data);
     if (S.tab === 'today' && S.date === op.date) renderToday();
   }
-  if (op.kind === 'weight' && !Q.list.some(o => o.kind === 'weight')) refreshWeights();
+  if ((op.kind === 'weight' || op.refreshW) && !Q.list.some(o => o.kind === 'weight')) refreshWeights();
+  if (op.refreshW) S.insights = null;
 }
 
 function afterQueueDrained() {
@@ -691,7 +692,9 @@ async function toggleParty() {
   d.day_type = next;
   d.target = toParty ? null : dayTargetFromSettings(d, next);
   commitDay(d);
-  enqueue('setDayType', { date: d.date, day_type: next }, { kind: 'day', date: d.date });
+  const nextDay = (S.weights || []).find(w => w.date === addDays(d.date, 1));
+  if (nextDay) nextDay.flag = toParty ? 'post_party' : '';
+  enqueue('setDayType', { date: d.date, day_type: next }, { kind: 'day', date: d.date, refreshW: !!nextDay });
 }
 
 // ======================= ตัวเลือกเมนู (picker) =======================
@@ -1357,9 +1360,12 @@ function weekBudgetHTML(w) {
 }
 
 async function applyTarget(v) {
-  if (!confirm('ปรับเป้าวันปกติเป็น ' + fmtN(v) + ' kcal?')) return;
+  const st = S.init.settings;
+  const wk = Number(st.weekday_target_kcal) || 0, home = Number(st.home_day_target_kcal) || wk;
+  const newHome = Math.max(0, home + (v - wk));          // ขยับวันอยู่บ้านเท่ากัน
+  if (!confirm('ปรับเป้า\n• วันทำงาน ' + fmtN(wk) + ' → ' + fmtN(v) + ' kcal\n• วันอยู่บ้าน ' + fmtN(home) + ' → ' + fmtN(newHome) + ' kcal\n\nวันที่บันทึกไปแล้วยังใช้เป้าเดิม')) return;
   try {
-    const r = await api('updateSettings', { values: { weekday_target_kcal: v } }, { wait: 'กำลังปรับเป้า…' });
+    const r = await api('updateSettings', { values: { weekday_target_kcal: v, home_day_target_kcal: newHome } }, { wait: 'กำลังปรับเป้า…' });
     S.init.settings = r.settings;
     invalidateDays(); S.weeks = {};
     toast('ปรับเป้าแล้ว ✓');

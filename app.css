@@ -535,6 +535,7 @@ section:has(> .chart), section:has(> .wk-chart) {
 }
 .tip.increase { box-shadow: var(--shadow), inset 4px 0 0 var(--bad); }
 .tip.keep { box-shadow: var(--shadow), inset 4px 0 0 var(--ok); }
+.tip.eat_more { box-shadow: var(--shadow), inset 4px 0 0 #F59E0B; }
 .tip p { margin: 0 0 10px; }
 .tip p:last-child { margin-bottom: 0; }
 .tbl { width: 100%; border-collapse: collapse; font-size: 14px; margin-top: 12px; background: var(--surface); border-radius: var(--r-card); overflow: hidden; box-shadow: var(--shadow); }
